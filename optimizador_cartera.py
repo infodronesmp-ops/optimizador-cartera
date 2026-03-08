@@ -731,7 +731,7 @@ with tabs[3]:
             # Heatmap
             fig = px.imshow(corr, text_auto=True, aspect='auto',
                 color_continuous_scale='RdYlGn_r',
-                title=f'Matriz de Correlación ({period_label} de historia)',
+                title=f'Matriz de Correlación ({years} años de historia)',
                 zmin=-1, zmax=1)
             fig.update_layout(paper_bgcolor='#111827', plot_bgcolor='#111827',
                 font_color='#e2e8f0', height=500)

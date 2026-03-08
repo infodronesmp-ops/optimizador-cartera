@@ -814,11 +814,7 @@ with tabs[4]:
         st.markdown("#### Métricas por activo")
         metrics_display = metrics.copy()
         metrics_display.index.name = 'Ticker'
-        st.dataframe(
-            metrics_display.style.background_gradient(subset=['Sharpe'], cmap='RdYlGn')
-                .background_gradient(subset=['Volatilidad %'], cmap='RdYlGn_r'),
-            use_container_width=True
-        )
+        st.dataframe(metrics_display, use_container_width=True)
 
         col1, col2 = st.columns(2)
         with col1:

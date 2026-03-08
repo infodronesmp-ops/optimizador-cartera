@@ -115,14 +115,23 @@ def calc_portfolio_weights(df):
 
 def calc_metrics(prices, weights=None, rf=0.02):
     """Calculate return, volatility, Sharpe, CAGR, Beta vs SPY."""
+    prices = prices.dropna(how='all')
+    if isinstance(prices, pd.Series):
+        prices = prices.to_frame()
+    if len(prices) < 30:
+        raise ValueError("Datos insuficientes para calcular métricas (mínimo 30 días).")
     returns = prices.pct_change().dropna()
+    if len(returns) == 0:
+        raise ValueError("No hay retornos calculables con los datos disponibles.")
     annual_ret = returns.mean() * 252
     annual_vol = returns.std() * np.sqrt(252)
     sharpe = (annual_ret - rf) / annual_vol
 
-    # CAGR
-    total_ret = (prices.iloc[-1] / prices.iloc[0])
-    years = len(prices) / 252
+    # CAGR — safe
+    first = prices.iloc[0].replace(0, np.nan)
+    last  = prices.iloc[-1]
+    total_ret = last / first
+    years = max(len(prices) / 252, 0.01)
     cagr = total_ret ** (1/years) - 1
 
     metrics = pd.DataFrame({
@@ -159,10 +168,11 @@ def portfolio_metrics(weights_arr, returns_df, rf=0.02):
     sharpe = (port_ret - rf) / port_vol
     return port_ret, port_vol, sharpe
 
-def max_sharpe(returns_df, rf=0.02):
+def max_sharpe(returns_df, rf=0.02, min_weight=0.0):
     n = len(returns_df.columns)
     w0 = np.ones(n) / n
-    bounds = [(0.01, 1)] * n
+    lb = max(min_weight, 0.0)
+    bounds = [(lb, 1.0)] * n
     constraints = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
     result = minimize(
         lambda w: -portfolio_metrics(w, returns_df, rf)[2],
@@ -170,16 +180,33 @@ def max_sharpe(returns_df, rf=0.02):
     )
     return result.x if result.success else w0
 
-def min_variance(returns_df):
+def min_variance(returns_df, min_weight=0.0):
     n = len(returns_df.columns)
     w0 = np.ones(n) / n
-    bounds = [(0.01, 1)] * n
+    lb = max(min_weight, 0.0)
+    bounds = [(lb, 1.0)] * n
     constraints = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
     result = minimize(
         lambda w: portfolio_metrics(w, returns_df)[1],
         w0, method='SLSQP', bounds=bounds, constraints=constraints
     )
     return result.x if result.success else w0
+
+def target_return_weights(returns_df, target_ret, min_weight=0.0):
+    """Minimize volatility subject to hitting a target annual return."""
+    n = len(returns_df.columns)
+    w0 = np.ones(n) / n
+    lb = max(min_weight, 0.0)
+    bounds = [(lb, 1.0)] * n
+    constraints = [
+        {'type': 'eq', 'fun': lambda w: np.sum(w) - 1},
+        {'type': 'eq', 'fun': lambda w: portfolio_metrics(w, returns_df)[0] - target_ret},
+    ]
+    result = minimize(
+        lambda w: portfolio_metrics(w, returns_df)[1],
+        w0, method='SLSQP', bounds=bounds, constraints=constraints
+    )
+    return result.x if result.success else None
 
 def black_litterman(weights, returns_df, views_q, views_conf, rf=0.02, tau=0.05):
     """Simplified Black-Litterman model."""
@@ -213,10 +240,41 @@ def monte_carlo(port_ret, port_vol, total_usd, n_sims=500, n_days=252):
 # ─────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Configuración")
-    period_map = {"1 año":"1y","2 años":"2y","3 años":"3y","5 años":"5y"}
-    period_label = st.selectbox("Años de historia", list(period_map.keys()), index=3)
-    PERIOD = period_map[period_label]
-    rf_rate = st.number_input("Tasa libre de riesgo (%)", value=2.0, step=0.25) / 100
+
+    # Años de historia — slider igual al otro optimizador
+    years = st.slider("Años de historia", min_value=1, max_value=20, value=5,
+        help="Cantidad de años de datos históricos a analizar")
+    period_map = {1:"1y",2:"2y",3:"3y",4:"4y",5:"5y",6:"6y",7:"7y",8:"8y",
+                  9:"9y",10:"10y",15:"15y",20:"20y"}
+    PERIOD = period_map.get(years, f"{years}y")
+
+    rf_rate = st.number_input("Tasa libre de riesgo (%)", value=2.0, step=0.25,
+        help="Tasa anual libre de riesgo (ej: 2%)") / 100
+
+    st.markdown("---")
+    st.markdown("### 📐 Opciones avanzadas")
+
+    # Retorno objetivo
+    use_target_return = st.checkbox("Usar retorno objetivo",
+        help="Optimizar la cartera buscando un retorno anual específico")
+    target_return_pct = None
+    if use_target_return:
+        target_return_pct = st.number_input(
+            "Retorno objetivo (%)", min_value=-50.0, max_value=100.0,
+            value=10.0, step=0.5,
+            help="Retorno anual objetivo para la optimización BL y Monte Carlo"
+        )
+        st.session_state['target_return'] = target_return_pct / 100
+    else:
+        st.session_state['target_return'] = None
+
+    # Peso mínimo por activo
+    min_weight_pct = st.number_input(
+        "Peso mínimo por activo (%)", min_value=0.0, max_value=50.0,
+        value=0.0, step=1.0,
+        help="Peso mínimo que debe tener cada activo en la cartera optimizada (0 = sin mínimo)"
+    )
+    st.session_state['min_weight'] = min_weight_pct / 100
 
     st.markdown("---")
     st.markdown("### 🏷️ Gestión de sectores")
@@ -322,22 +380,31 @@ with tabs[0]:
             new_sector = c4.selectbox("Sector", [""] + st.session_state.sectors)
             submitted = st.form_submit_button("➕ Agregar", type="primary")
 
-            if submitted and new_ticker:
-                # Validate ticker format
-                import re
-                if not re.match(r'^[A-Z0-9.\-]{1,10}$', new_ticker):
-                    st.error("⚠️ Formato de ticker inválido")
+        # Handle outside form to allow st.rerun()
+        if submitted and new_ticker:
+            import re
+            if not re.match(r'^[A-Z0-9.\-]{1,10}$', new_ticker):
+                st.error("⚠️ Formato de ticker inválido")
+            else:
+                # Validate ticker exists on Yahoo Finance
+                with st.spinner(f"Verificando {new_ticker}..."):
+                    try:
+                        info = yf.Ticker(new_ticker).fast_info
+                        ticker_ok = hasattr(info, 'last_price') and info.last_price and info.last_price > 0
+                    except:
+                        ticker_ok = False
+                if not ticker_ok:
+                    st.error(f"❌ **{new_ticker}** no se encontró en Yahoo Finance — verificá que el ticker sea correcto (ej: TSLA, no TESLA)")
+                elif new_ticker in st.session_state.portfolio['Ticker'].values:
+                    idx = st.session_state.portfolio[st.session_state.portfolio['Ticker']==new_ticker].index[0]
+                    st.session_state.portfolio.loc[idx,'Monto_USD'] += new_monto
+                    st.session_state.portfolio.loc[idx,'Target_%'] += new_target
+                    st.warning(f"⚠️ {new_ticker} ya existía — se sumó el monto y target")
+                    st.rerun()
                 else:
-                    # Check duplicate
-                    if new_ticker in st.session_state.portfolio['Ticker'].values:
-                        # Merge
-                        idx = st.session_state.portfolio[st.session_state.portfolio['Ticker']==new_ticker].index[0]
-                        st.session_state.portfolio.loc[idx,'Monto_USD'] += new_monto
-                        st.session_state.portfolio.loc[idx,'Target_%'] += new_target
-                        st.warning(f"⚠️ {new_ticker} ya existía — se unificó el monto y target")
-                    else:
-                        new_row = pd.DataFrame([{'Ticker':new_ticker,'Monto_USD':new_monto,'Target_%':new_target,'Sector':new_sector}])
-                        st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_row], ignore_index=True)
+                    new_row = pd.DataFrame([{'Ticker':new_ticker,'Monto_USD':new_monto,'Target_%':new_target,'Sector':new_sector}])
+                    st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_row], ignore_index=True)
+                    st.success(f"✅ {new_ticker} agregado correctamente")
                     st.rerun()
 
     st.markdown("---")
@@ -718,7 +785,11 @@ with tabs[4]:
         prices_clean = prices[available].dropna()
 
         with st.spinner("Calculando métricas..."):
-            metrics, returns = calc_metrics(prices_clean, rf=rf_rate)
+            try:
+                metrics, returns = calc_metrics(prices_clean, rf=rf_rate)
+            except Exception as e:
+                st.error(f"❌ No se pudieron calcular las métricas: {e}\n\nAsegurate de que los tickers tengan datos suficientes y de haber hecho click en **Cargar datos de mercado**.")
+                st.stop()
 
         # Portfolio-level
         weights_actual = np.array([
@@ -911,9 +982,20 @@ with tabs[6]:
             posterior_mu = black_litterman(w_actual, returns, views_q, views_conf, rf=rf_rate)
             prior_mu = returns.mean() * 252
 
-            # Optimal BL weights (maximize posterior Sharpe)
-            w_bl = max_sharpe(returns, rf=rf_rate)
-            w_minvar = min_variance(returns)
+            # Read sidebar settings
+            min_w = st.session_state.get('min_weight', 0.0)
+            target_ret = st.session_state.get('target_return', None)
+
+            # Optimal BL weights
+            w_bl = max_sharpe(returns, rf=rf_rate, min_weight=min_w)
+            w_minvar = min_variance(returns, min_weight=min_w)
+
+            # Target return portfolio (if enabled)
+            w_target = None
+            if target_ret is not None:
+                w_target = target_return_weights(returns, target_ret, min_weight=min_w)
+                if w_target is None:
+                    st.warning(f"⚠️ No se encontró solución para retorno objetivo {target_ret*100:.1f}% — puede estar fuera del rango alcanzable con estos activos.")
 
             # Results table
             bl_df = pd.DataFrame({
@@ -955,12 +1037,17 @@ with tabs[6]:
             port_bl = portfolio_metrics(w_bl, returns, rf_rate)
             port_mv = portfolio_metrics(w_minvar, returns, rf_rate)
 
+            scatter_ports = [
+                ('Actual',      port_actual, '#00d4ff', 'x'),
+                ('BL Óptimo',   port_bl,     '#f87171', 'square'),
+                ('Min Varianza',port_mv,     '#4ade80', 'circle'),
+            ]
+            if w_target is not None:
+                port_tgt = portfolio_metrics(w_target, returns, rf_rate)
+                scatter_ports.append((f'Ret.Obj {target_ret*100:.0f}%', port_tgt, '#fbbf24', 'diamond'))
+
             fig3 = go.Figure()
-            for label, stats, color, symbol in [
-                ('Actual', port_actual, '#00d4ff', 'x'),
-                ('BL Óptimo', port_bl, '#f87171', 'square'),
-                ('Min Varianza', port_mv, '#4ade80', 'circle'),
-            ]:
+            for label, stats, color, symbol in scatter_ports:
                 fig3.add_trace(go.Scatter(x=[stats[1]*100], y=[stats[0]*100],
                     mode='markers+text', name=f"{label} (Sharpe:{stats[2]:.2f})",
                     text=[label], textposition='top center',
@@ -971,9 +1058,10 @@ with tabs[6]:
                 xaxis_title='Volatilidad %', yaxis_title='Retorno %')
             st.plotly_chart(fig3, use_container_width=True)
 
-            # Store for MC
+            # Store for MC — prefer target return portfolio if set
+            best = port_tgt if (w_target is not None) else port_bl
             st.session_state['bl_stats'] = {
-                'ret_bl': port_bl[0], 'vol_bl': port_bl[1]
+                'ret_bl': best[0], 'vol_bl': best[1]
             }
 
 

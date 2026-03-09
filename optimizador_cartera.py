@@ -569,7 +569,7 @@ with tabs[1]:
             fig.update_traces(textposition='inside', textinfo='label+percent',
                 textfont_size=11, hole=0.3)
             fig.update_layout(paper_bgcolor='#111827', plot_bgcolor='#111827',
-                font_color='#e2e8f0', showlegend=True,
+                font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, showlegend=True,
                 legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
             st.plotly_chart(fig, use_container_width=True)
 
@@ -583,7 +583,7 @@ with tabs[1]:
                 marker_color='rgba(255,107,53,0.6)'))
             fig2.update_layout(barmode='group', title='Actual vs Target por Sector',
                 paper_bgcolor='#111827', plot_bgcolor='#111827',
-                font_color='#e2e8f0', yaxis_title='%',
+                font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%',
                 legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
             st.plotly_chart(fig2, use_container_width=True)
 
@@ -615,7 +615,7 @@ with tabs[1]:
             fig3.update_layout(
                 title='Desvío por Sector (Actual − Target)',
                 paper_bgcolor='#111827', plot_bgcolor='#111827',
-                font_color='#e2e8f0', yaxis_title='Desvío %',
+                font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='Desvío %',
                 showlegend=False
             )
             st.plotly_chart(fig3, use_container_width=True)
@@ -646,7 +646,7 @@ with tabs[1]:
             fig4.update_layout(
                 title='Concentración por Sector (Pareto)',
                 paper_bgcolor='#111827', plot_bgcolor='#111827',
-                font_color='#e2e8f0',
+                font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
                 yaxis=dict(title='Peso %', gridcolor='rgba(30,45,69,0.6)'),
                 yaxis2=dict(title='Acum %', overlaying='y', side='right',
                     range=[0, 105], showgrid=False, ticksuffix='%'),
@@ -703,7 +703,7 @@ with tabs[2]:
                 marker_color='rgba(255,107,53,0.65)'))
             fig.update_layout(barmode='group', title='Tenencia Actual vs Target',
                 paper_bgcolor='#111827', plot_bgcolor='#111827',
-                font_color='#e2e8f0', yaxis_title='%')
+                font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%')
             st.plotly_chart(fig, use_container_width=True)
 
         with col2:
@@ -713,7 +713,7 @@ with tabs[2]:
             fig2.update_traces(textposition='inside', textinfo='label+percent',
                 textfont_size=10, hole=0.25)
             fig2.update_layout(paper_bgcolor='#111827', plot_bgcolor='#111827',
-                font_color='#e2e8f0', showlegend=False)
+                font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, showlegend=False)
             st.plotly_chart(fig2, use_container_width=True)
 
         buf = io.BytesIO()
@@ -758,7 +758,7 @@ with tabs[3]:
                 title=f'Matriz de Correlación ({years} años de historia)',
                 zmin=-1, zmax=1)
             fig.update_layout(paper_bgcolor='#111827', plot_bgcolor='#111827',
-                font_color='#e2e8f0', height=500)
+                font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, height=500)
             fig.update_traces(textfont_size=11)
             st.plotly_chart(fig, use_container_width=True)
 
@@ -772,7 +772,7 @@ with tabs[3]:
                     text=avg_corr.round(2).values, textposition='outside'))
                 fig2.update_layout(title='Correlación promedio por activo',
                     paper_bgcolor='#111827', plot_bgcolor='#111827',
-                    font_color='#e2e8f0', yaxis=dict(range=[0,1]))
+                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis=dict(range=[0,1]))
                 st.plotly_chart(fig2, use_container_width=True)
 
             with col2:
@@ -789,7 +789,7 @@ with tabs[3]:
                         annotation_text='Alto (0.80)')
                     fig3.update_layout(title=f'Correlación móvil 60d: {t1} vs {t2}',
                         paper_bgcolor='#111827', plot_bgcolor='#111827',
-                        font_color='#e2e8f0', yaxis_title='Correlación')
+                        font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='Correlación')
                     st.plotly_chart(fig3, use_container_width=True)
 
         with st.expander("📖 ¿Cómo interpretar la correlación?"):
@@ -858,7 +858,7 @@ with tabs[4]:
                 orientation='h', marker_color=colors_s,
                 text=sharpe_sorted.round(2).values, textposition='outside'))
             fig.update_layout(title='Sharpe Ratio por activo',
-                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0')
+                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14)
             st.plotly_chart(fig, use_container_width=True)
 
         with col2:
@@ -874,7 +874,7 @@ with tabs[4]:
                 ))
             fig2.update_layout(title='Mapa Riesgo vs Retorno',
                 paper_bgcolor='#111827', plot_bgcolor='#111827',
-                font_color='#e2e8f0', showlegend=False,
+                font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, showlegend=False,
                 xaxis_title='Volatilidad %', yaxis_title='Retorno Anual %')
             st.plotly_chart(fig2, use_container_width=True)
 
@@ -948,7 +948,7 @@ with tabs[5]:
         fig.update_layout(
             title='Rendimiento Acumulado (%)',
             paper_bgcolor='#111827', plot_bgcolor='#111827',
-            font_color='#e2e8f0', yaxis_title='Retorno %',
+            font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='Retorno %',
             legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)')
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -968,7 +968,7 @@ with tabs[5]:
         ))
         fig2.update_layout(title='CAGR anualizado',
             paper_bgcolor='#111827', plot_bgcolor='#111827',
-            font_color='#e2e8f0', yaxis_title='%')
+            font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%')
         st.plotly_chart(fig2, use_container_width=True)
 
         with st.expander("📖 ¿Cómo interpretar este gráfico?"):
@@ -1030,7 +1030,7 @@ with tabs[6]:
         fig.update_layout(
             title='Distribución de Retornos Diarios de la Cartera',
             paper_bgcolor='#111827', plot_bgcolor='#111827',
-            font_color='#e2e8f0', xaxis_title='Retorno Diario %', yaxis_title='Frecuencia',
+            font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, xaxis_title='Retorno Diario %', yaxis_title='Frecuencia',
             showlegend=False
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -1127,7 +1127,7 @@ with tabs[7]:
         ))
         fig.update_layout(title='Impacto estimado por escenario',
             paper_bgcolor='#111827', plot_bgcolor='#111827',
-            font_color='#e2e8f0', yaxis_title='% impacto', xaxis_tickangle=-25)
+            font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='% impacto', xaxis_tickangle=-25)
         st.plotly_chart(fig, use_container_width=True)
 
         # Historical drawdown from real data
@@ -1149,7 +1149,7 @@ with tabs[7]:
                     fillcolor='rgba(248,113,113,0.15)'))
                 fig2.update_layout(title='Drawdown histórico real',
                     paper_bgcolor='#111827', plot_bgcolor='#111827',
-                    font_color='#e2e8f0', yaxis_title='Drawdown %')
+                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='Drawdown %')
                 st.plotly_chart(fig2, use_container_width=True)
                 st.info(f"📉 Máximo drawdown histórico: **{drawdown.min():.2f}%**")
 
@@ -1231,7 +1231,7 @@ with tabs[8]:
 
             fig.update_layout(
                 title='Espacio de Portfolios — Frontera Eficiente de Markowitz',
-                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0',
+                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
                 xaxis_title='Volatilidad Anual %', yaxis_title='Retorno Anual %',
                 legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'),
                 height=550
@@ -1253,13 +1253,16 @@ with tabs[8]:
                     st.metric("Sharpe", f"{s:.2f}")
                     df_comp = pd.DataFrame({'Ticker': available, 'Peso %': (w*100).round(1)})\
                         .sort_values('Peso %', ascending=False)
+                    # Convert hex color to rgba for transparency
+                    color_map = {'#f87171':'rgba(248,113,113,0.7)','#4ade80':'rgba(74,222,128,0.7)','#00d4ff':'rgba(0,212,255,0.7)'}
+                    bar_color = color_map.get(color, 'rgba(0,212,255,0.7)')
                     fig_comp = go.Figure(go.Bar(
                         x=df_comp['Ticker'], y=df_comp['Peso %'],
-                        marker_color=color+'99',
+                        marker_color=bar_color,
                         text=df_comp['Peso %'].astype(str)+'%', textposition='outside'
                     ))
                     fig_comp.update_layout(paper_bgcolor='#111827', plot_bgcolor='#111827',
-                        font_color='#e2e8f0', height=250, margin=dict(t=10,b=10),
+                        font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, height=250, margin=dict(t=10,b=10),
                         yaxis_title='%', showlegend=False)
                     st.plotly_chart(fig_comp, use_container_width=True)
 
@@ -1347,7 +1350,7 @@ with tabs[9]:
                     textposition='outside'))
                 fig.update_layout(title='Delta BL (Posterior − Prior)',
                     paper_bgcolor='#111827', plot_bgcolor='#111827',
-                    font_color='#e2e8f0', yaxis_title='puntos % anual')
+                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='puntos % anual')
                 st.plotly_chart(fig, use_container_width=True)
 
             with col2:
@@ -1358,7 +1361,7 @@ with tabs[9]:
                     y=bl_df['Peso BL %'], marker_color='rgba(255,107,53,.7)'))
                 fig2.update_layout(barmode='group', title='Pesos: Actual vs BL Óptimo',
                     paper_bgcolor='#111827', plot_bgcolor='#111827',
-                    font_color='#e2e8f0', yaxis_title='%')
+                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%')
                 st.plotly_chart(fig2, use_container_width=True)
 
             # Frontier scatter
@@ -1383,7 +1386,7 @@ with tabs[9]:
                     marker=dict(size=16, color=color, symbol=symbol,
                         line=dict(width=2, color=color))))
             fig3.update_layout(title='Frontera Eficiente: Actual vs BL vs MinVar',
-                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0',
+                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
                 xaxis_title='Volatilidad %', yaxis_title='Retorno %')
             st.plotly_chart(fig3, use_container_width=True)
 
@@ -1442,7 +1445,7 @@ with tabs[10]:
                 line=dict(color='#ff6b35', width=3)))
             fig.update_layout(
                 title=f'Proyección Monte Carlo ({int(n_days)} días) — Capital inicial: {fmt_usd(total)}',
-                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0',
+                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
                 xaxis_title='Días de Trading', yaxis_title='Valor USD',
                 yaxis=dict(tickformat='$,.0f'))
             st.plotly_chart(fig, use_container_width=True)
@@ -1477,7 +1480,7 @@ with tabs[10]:
                     name=f'BL Optim (Media: {fmt_usd(med_bl)})',
                     marker_color='rgba(255,107,53,0.55)'))
                 fig2.update_layout(barmode='overlay', title='Distribución de valor final',
-                    paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0',
+                    paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
                     xaxis=dict(tickformat='$,.0f'), yaxis_title='Frecuencia')
                 st.plotly_chart(fig2, use_container_width=True)
 
@@ -1491,6 +1494,6 @@ with tabs[10]:
                     y=[np.percentile(final_bl,p) for p in pcts],
                     name='BL Optim', marker_color='rgba(255,107,53,0.7)'))
                 fig3.update_layout(barmode='group', title='Percentiles de resultado',
-                    paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0',
+                    paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
                     yaxis=dict(tickformat='$,.0f'))
                 st.plotly_chart(fig3, use_container_width=True)

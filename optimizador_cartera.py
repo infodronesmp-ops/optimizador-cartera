@@ -143,15 +143,25 @@ def calc_metrics(prices, weights=None, rf=0.02):
 
     # Beta vs SPY
     try:
-        spy = yf.download('SPY', period='5y', auto_adjust=True, progress=False)['Close']
+        spy_raw = yf.download('SPY', period=f'{max(int(years),1)}y', auto_adjust=True, progress=False)
+        if isinstance(spy_raw.columns, pd.MultiIndex):
+            spy = spy_raw['Close']['SPY'] if 'SPY' in spy_raw['Close'].columns else spy_raw['Close'].iloc[:,0]
+        else:
+            spy = spy_raw['Close'] if 'Close' in spy_raw.columns else spy_raw.iloc[:,0]
+        spy = spy.squeeze()
         spy_ret = spy.pct_change().dropna()
         betas = {}
         for col in returns.columns:
-            aligned = returns[col].align(spy_ret, join='inner')
-            cov = np.cov(aligned[0], aligned[1])
-            betas[col] = round(cov[0,1] / cov[1,1], 2) if cov[1,1] != 0 else np.nan
+            s1 = returns[col].dropna()
+            s2 = spy_ret.dropna()
+            common = s1.index.intersection(s2.index)
+            if len(common) > 30:
+                cov_matrix = np.cov(s1.loc[common].values, s2.loc[common].values)
+                betas[col] = round(cov_matrix[0,1] / cov_matrix[1,1], 2) if cov_matrix[1,1] != 0 else np.nan
+            else:
+                betas[col] = np.nan
         metrics['Beta SPY'] = pd.Series(betas)
-    except:
+    except Exception as e:
         metrics['Beta SPY'] = np.nan
 
     # VaR 95%
@@ -446,8 +456,21 @@ with tabs[0]:
 
         # Editable table
         st.markdown("#### Editá tu cartera")
+
+        # ✅ Fix 2: selector de orden
+        sort_col_map = {
+            'Ticker (A→Z)': ('Ticker', True),
+            'Monto USD (mayor→menor)': ('Monto_USD', False),
+            'Peso Actual % (mayor→menor)': ('Peso_Actual_%', False),
+            'Desvío % (mayor→menor)': ('Desvio_%', False),
+            'Sector (A→Z)': ('Sector', True),
+        }
+        sort_choice = st.selectbox("Ordenar por", list(sort_col_map.keys()), index=1, key="sort_portfolio")
+        sort_field, sort_asc = sort_col_map[sort_choice]
+        df_sorted = df[['Ticker','Monto_USD','Target_%','Sector','Peso_Actual_%','Desvio_%']].round(2).sort_values(sort_field, ascending=sort_asc)
+
         edited = st.data_editor(
-            df[['Ticker','Monto_USD','Target_%','Sector','Peso_Actual_%','Desvio_%']].round(2),
+            df_sorted,
             column_config={
                 'Ticker': st.column_config.TextColumn('Ticker', width='small'),
                 'Monto_USD': st.column_config.NumberColumn('Monto USD', format="$%.0f"),
@@ -544,7 +567,7 @@ with tabs[1]:
                 textfont_size=11, hole=0.3)
             fig.update_layout(paper_bgcolor='#111827', plot_bgcolor='#111827',
                 font_color='#e2e8f0', showlegend=True,
-                legend=dict(font=dict(size=10)))
+                legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
             st.plotly_chart(fig, use_container_width=True)
 
         with col2:
@@ -558,7 +581,7 @@ with tabs[1]:
             fig2.update_layout(barmode='group', title='Actual vs Target por Sector',
                 paper_bgcolor='#111827', plot_bgcolor='#111827',
                 font_color='#e2e8f0', yaxis_title='%',
-                legend=dict(font=dict(size=10)))
+                legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
             st.plotly_chart(fig2, use_container_width=True)
 
         # ── Fila 2: Desvío por sector + Pareto ──
@@ -566,7 +589,6 @@ with tabs[1]:
         col3, col4 = st.columns(2)
 
         with col3:
-            # Solo mostrar sectores con target asignado; si ninguno tiene, usar todos
             sg_dev = sector_group.copy()
             sg_dev['Peso_Actual_num'] = df.groupby('Sector')['Peso_Actual_%'].sum().reindex(sg_dev['Sector']).values
             has_targets = (sg_dev['Target_%'] > 0).any()
@@ -576,7 +598,8 @@ with tabs[1]:
             else:
                 avg = sg_dev['Peso_Actual_num'].mean()
                 sg_dev['Desvío_num'] = sg_dev['Peso_Actual_num'] - avg
-            sg_dev = sg_dev.sort_values('Desvío_num')
+            # ✅ Fix 3: ordenado de mayor a menor (mismo criterio que Pareto)
+            sg_dev = sg_dev.sort_values('Desvío_num', ascending=False)
             colors_dev = ['rgba(74,222,128,0.8)' if v >= 0 else 'rgba(248,113,113,0.8)'
                 for v in sg_dev['Desvío_num']]
             fig3 = go.Figure(go.Bar(
@@ -595,7 +618,6 @@ with tabs[1]:
             st.plotly_chart(fig3, use_container_width=True)
 
         with col4:
-            # Pareto por sector
             sg_par = df.groupby('Sector')['Peso_Actual_%'].sum().reset_index()
             sg_par.columns = ['Sector', 'Peso']
             sg_par = sg_par.sort_values('Peso', ascending=False).reset_index(drop=True)
@@ -624,9 +646,8 @@ with tabs[1]:
                 font_color='#e2e8f0',
                 yaxis=dict(title='Peso %', gridcolor='rgba(30,45,69,0.6)'),
                 yaxis2=dict(title='Acum %', overlaying='y', side='right',
-                    range=[0, 105], showgrid=False,
-                    ticksuffix='%'),
-                legend=dict(font=dict(size=10))
+                    range=[0, 105], showgrid=False, ticksuffix='%'),
+                legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)')
             )
             st.plotly_chart(fig4, use_container_width=True)
 
@@ -799,16 +820,20 @@ with tabs[4]:
         if len(weights_actual) == len(available):
             port_ret, port_vol, port_sharpe = portfolio_metrics(weights_actual, returns, rf_rate)
             port_var1d = (-np.dot(weights_actual, returns.quantile(0.05))) * 100
-            port_beta = metrics['Beta SPY'].mean()
+            beta_values = metrics['Beta SPY'].dropna()
+            port_beta = float(np.dot(
+                [w for t,w in zip(available, weights_actual) if t in metrics.index and not np.isnan(metrics.loc[t,'Beta SPY'])],
+                beta_values.reindex([t for t in available if t in beta_values.index]).dropna().values
+            )) if len(beta_values) > 0 else np.nan
 
             m1,m2,m3,m4,m5,m6 = st.columns(6)
             m1.metric("Retorno Anual", f"{port_ret*100:.1f}%")
             m2.metric("Volatilidad", f"{port_vol*100:.1f}%")
             m3.metric("Sharpe", f"{port_sharpe:.2f}")
-            m4.metric("Beta vs SPY", f"{port_beta:.2f}")
+            m4.metric("Beta vs SPY", f"{port_beta:.2f}" if not np.isnan(port_beta) else "—")
             m5.metric("VaR 1d 95%", f"{port_var1d:.2f}%")
             m6.metric("VaR 10d 95%", f"{port_var1d*np.sqrt(10):.2f}%")
-            st.session_state['port_stats'] = {'ret':port_ret,'vol':port_vol,'sharpe':port_sharpe,'beta':port_beta}
+            st.session_state['port_stats'] = {'ret':port_ret,'vol':port_vol,'sharpe':port_sharpe,'beta':port_beta if not np.isnan(port_beta) else 1.0}
 
         # Table
         st.markdown("#### Métricas por activo")

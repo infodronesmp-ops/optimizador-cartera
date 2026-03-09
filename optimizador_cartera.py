@@ -331,7 +331,10 @@ tabs = st.tabs([
     "⚖️ Rebalanceo",
     "🔗 Correlación",
     "📐 Métricas",
+    "📈 Rendimiento",
+    "⚠️ VaR",
     "🔥 Stress Test",
+    "🌐 Frontera Eficiente",
     "🧠 Black-Litterman",
     "🎲 Monte Carlo",
 ])
@@ -789,10 +792,15 @@ with tabs[3]:
                         font_color='#e2e8f0', yaxis_title='Correlación')
                     st.plotly_chart(fig3, use_container_width=True)
 
-
-# ══════════════════════════════════════════
-#  TAB 5 — MÉTRICAS
-# ══════════════════════════════════════════
+        with st.expander("📖 ¿Cómo interpretar la correlación?"):
+            st.markdown("""
+- La correlación mide cuánto se mueven juntos dos activos. Va de **-1 a +1**.
+- **+1**: se mueven exactamente igual (no diversifican).
+- **0**: movimientos independientes (buena diversificación).
+- **-1**: se mueven opuesto (cobertura perfecta).
+- ⚠️ Correlación **>0.80** es una alerta: esos activos se comportan casi igual y no agregan diversificación real.
+- El gráfico de correlación móvil muestra si la relación entre dos activos cambia con el tiempo — lo ideal es que sea estable y baja.
+            """)
 with tabs[4]:
     st.subheader("📐 Métricas reales")
     if st.session_state.portfolio.empty:
@@ -870,11 +878,189 @@ with tabs[4]:
                 xaxis_title='Volatilidad %', yaxis_title='Retorno Anual %')
             st.plotly_chart(fig2, use_container_width=True)
 
+        with st.expander("📖 ¿Cómo interpretar estas métricas?"):
+            st.markdown("""
+- **Retorno Anual %**: Rendimiento anualizado promedio en el período seleccionado.
+- **Volatilidad %**: Desviación estándar anualizada — mide el riesgo total del activo.
+- **Sharpe**: Retorno ajustado por riesgo. >1 es bueno, >2 es excelente. Menor a 0.5 indica que el riesgo no se está compensando.
+- **CAGR %**: Tasa de crecimiento anual compuesta — el retorno real si hubieras mantenido el activo todo el período.
+- **Beta SPY**: Sensibilidad al mercado. Beta=1 se mueve igual que el mercado. Beta>1 amplifica movimientos. Beta<1 es más defensivo.
+- **VaR 1d 95%**: Pérdida máxima esperada en un día normal (95% de confianza). Ejemplo: VaR=2% significa que solo hay 5% de chances de perder más de 2% en un día.
+            """)
+
+
+# ══════════════════════════════════════════
+#  TAB 6 — RENDIMIENTO
+# ══════════════════════════════════════════
+with tabs[5]:
+    st.subheader("📈 Rendimiento acumulado")
+    if st.session_state.portfolio.empty:
+        st.info("Cargá tu cartera primero")
+    elif st.session_state.hist_data is None:
+        st.warning("⬅️ Cargá datos de mercado primero")
+    else:
+        prices = st.session_state.hist_data
+        df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
+        available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
+        prices_clean = prices[available].dropna()
+
+        weights_actual = np.array([df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]/100
+            for t in available])
+
+        # Portfolio combined price
+        port_prices = (prices_clean * weights_actual).sum(axis=1)
+        port_cum = (port_prices / port_prices.iloc[0] - 1) * 100
+
+        # Download benchmarks
+        with st.spinner("Descargando SPY y QQQ..."):
+            try:
+                bench_raw = yf.download(['SPY','QQQ'], period=PERIOD, auto_adjust=True, progress=False)
+                if isinstance(bench_raw.columns, pd.MultiIndex):
+                    bench = bench_raw['Close']
+                else:
+                    bench = bench_raw
+                bench = bench.reindex(port_cum.index, method='ffill').dropna()
+                spy_cum  = (bench['SPY']  / bench['SPY'].iloc[0]  - 1) * 100 if 'SPY'  in bench.columns else None
+                qqq_cum  = (bench['QQQ']  / bench['QQQ'].iloc[0]  - 1) * 100 if 'QQQ'  in bench.columns else None
+            except:
+                spy_cum, qqq_cum = None, None
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=port_cum.index, y=port_cum.values,
+            name='Mi Cartera', line=dict(color='#00d4ff', width=2.5)))
+        if spy_cum is not None:
+            fig.add_trace(go.Scatter(x=spy_cum.index, y=spy_cum.values,
+                name='SPY', line=dict(color='#f87171', width=1.5, dash='dash')))
+        if qqq_cum is not None:
+            fig.add_trace(go.Scatter(x=qqq_cum.index, y=qqq_cum.values,
+                name='QQQ', line=dict(color='#fbbf24', width=1.5, dash='dot')))
+
+        # Individual tickers
+        show_tickers = st.checkbox("Mostrar activos individuales", value=False)
+        if show_tickers:
+            for i, t in enumerate(available):
+                cum = (prices_clean[t] / prices_clean[t].iloc[0] - 1) * 100
+                fig.add_trace(go.Scatter(x=cum.index, y=cum.values,
+                    name=t, line=dict(width=1, dash='dot'),
+                    opacity=0.6))
+
+        fig.add_hline(y=0, line_dash='dot', line_color='rgba(255,255,255,0.2)')
+        fig.update_layout(
+            title='Rendimiento Acumulado (%)',
+            paper_bgcolor='#111827', plot_bgcolor='#111827',
+            font_color='#e2e8f0', yaxis_title='Retorno %',
+            legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)')
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # CAGR comparison bar
+        st.markdown("#### CAGR comparativo")
+        cagr_items = {'Mi Cartera': float((port_prices.iloc[-1]/port_prices.iloc[0])**(252/len(port_prices))-1)*100}
+        if spy_cum is not None:
+            cagr_items['SPY'] = float((bench['SPY'].iloc[-1]/bench['SPY'].iloc[0])**(252/len(bench))-1)*100
+        if qqq_cum is not None:
+            cagr_items['QQQ'] = float((bench['QQQ'].iloc[-1]/bench['QQQ'].iloc[0])**(252/len(bench))-1)*100
+
+        fig2 = go.Figure(go.Bar(
+            x=list(cagr_items.keys()), y=list(cagr_items.values()),
+            marker_color=['#00d4ff','#f87171','#fbbf24'][:len(cagr_items)],
+            text=[f"{v:.1f}%" for v in cagr_items.values()], textposition='outside'
+        ))
+        fig2.update_layout(title='CAGR anualizado',
+            paper_bgcolor='#111827', plot_bgcolor='#111827',
+            font_color='#e2e8f0', yaxis_title='%')
+        st.plotly_chart(fig2, use_container_width=True)
+
+        with st.expander("📖 ¿Cómo interpretar este gráfico?"):
+            st.markdown("""
+- El gráfico muestra el crecimiento acumulado de $1 invertido al inicio del período.
+- **Línea azul** = tu cartera con los pesos actuales.
+- **Línea roja** = SPY (S&P 500 — benchmark del mercado americano).
+- **Línea amarilla** = QQQ (Nasdaq 100 — benchmark tecnológico).
+- **CAGR** = Tasa de Crecimiento Anual Compuesta — es el retorno anual equivalente si hubieras mantenido la inversión todo el período.
+            """)
+
+
+# ══════════════════════════════════════════
+#  TAB 7 — VaR
+# ══════════════════════════════════════════
+with tabs[6]:
+    st.subheader("⚠️ Value at Risk (VaR) — 95% de confianza")
+    if st.session_state.portfolio.empty:
+        st.info("Cargá tu cartera primero")
+    elif st.session_state.hist_data is None:
+        st.warning("⬅️ Cargá datos de mercado primero")
+    else:
+        prices = st.session_state.hist_data
+        df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
+        available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
+        prices_clean = prices[available].dropna()
+        returns_all = prices_clean.pct_change().dropna()
+
+        weights_actual = np.array([df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]/100
+            for t in available])
+
+        port_ret_series = returns_all.dot(weights_actual)
+        var_1d = float(-port_ret_series.quantile(0.05) * 100)
+        var_10d = var_1d * np.sqrt(10)
+        cvar = float(-port_ret_series[port_ret_series <= port_ret_series.quantile(0.05)].mean() * 100)
+
+        total = df_port['Total'].iloc[0]
+        m1,m2,m3,m4 = st.columns(4)
+        m1.metric("VaR 1d 95%", f"{var_1d:.2f}%", delta=f"-{var_1d/100*total:,.0f} USD")
+        m2.metric("VaR 10d 95%", f"{var_10d:.2f}%", delta=f"-{var_10d/100*total:,.0f} USD")
+        m3.metric("CVaR 1d 95%", f"{cvar:.2f}%", delta=f"-{cvar/100*total:,.0f} USD")
+        m4.metric("Capital en riesgo (1d)", fmt_usd(var_1d/100*total))
+
+        # Histogram
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(
+            x=port_ret_series.values * 100,
+            nbinsx=60,
+            name='Retornos diarios',
+            marker_color='rgba(0,212,255,0.6)',
+            opacity=0.8
+        ))
+        fig.add_vline(x=-var_1d, line_dash='dash', line_color='#f87171', line_width=2,
+            annotation_text=f'VaR 95% = -{var_1d:.2f}%',
+            annotation_font_color='#f87171', annotation_position='top left')
+        fig.add_vline(x=-cvar, line_dash='dot', line_color='#fbbf24', line_width=2,
+            annotation_text=f'CVaR = -{cvar:.2f}%',
+            annotation_font_color='#fbbf24', annotation_position='bottom left')
+        fig.update_layout(
+            title='Distribución de Retornos Diarios de la Cartera',
+            paper_bgcolor='#111827', plot_bgcolor='#111827',
+            font_color='#e2e8f0', xaxis_title='Retorno Diario %', yaxis_title='Frecuencia',
+            showlegend=False
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # VaR by ticker
+        st.markdown("#### VaR por activo")
+        var_data = []
+        for t in available:
+            r = returns_all[t]
+            v1 = float(-r.quantile(0.05)*100)
+            var_data.append({'Ticker':t, 'VaR 1d %':round(v1,2), 'VaR 10d %':round(v1*np.sqrt(10),2),
+                'CVaR 1d %':round(float(-r[r<=r.quantile(0.05)].mean()*100),2)})
+        st.dataframe(pd.DataFrame(var_data).sort_values('VaR 1d %', ascending=False),
+            use_container_width=True, hide_index=True)
+
+        with st.expander("📖 ¿Cómo interpretar el VaR?"):
+            st.markdown("""
+- **VaR 1d 95%**: Pérdida máxima esperada en un **día normal**. Con 95% de confianza, no se espera perder más de ese % en un solo día.
+- **VaR 10d 95%**: Mismo concepto pero proyectado a 10 días hábiles (se escala por √10).
+- **CVaR (Expected Shortfall)**: Promedio de las pérdidas que **sí superan** el VaR — mide qué tan malo puede ser el peor 5% de los días.
+- La línea roja en el histograma marca el VaR. Todo lo que queda a la izquierda de esa línea es el 5% de peores días históricos.
+- Ejemplo: VaR=2.5% significa que solo 1 de cada 20 días se perdió más de 2.5%.
+            """)
+
+
 
 # ══════════════════════════════════════════
 #  TAB 6 — STRESS TEST
 # ══════════════════════════════════════════
-with tabs[5]:
+with tabs[7]:
     st.subheader("🔥 Stress Test")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -967,11 +1153,133 @@ with tabs[5]:
                 st.plotly_chart(fig2, use_container_width=True)
                 st.info(f"📉 Máximo drawdown histórico: **{drawdown.min():.2f}%**")
 
+        with st.expander("📖 ¿Cómo interpretar el Stress Test?"):
+            st.markdown("""
+- Cada fila muestra la **caída estimada de tu cartera** si el SPY (mercado) baja ese porcentaje.
+- El cálculo usa la **Beta** de tu cartera: si Beta=1.2 y el SPY cae 10%, tu cartera caería aproximadamente 12%.
+- 🟡 Pérdida leve (<15%) · 🟠 Pérdida moderada (15-30%) · 🔴 Pérdida severa (>30%)
+- Los escenarios históricos (2008, COVID) reflejan caídas reales del mercado en esos eventos.
+- El **Drawdown histórico** muestra la caída máxima real que tuvo tu cartera en el período analizado.
+- ⚠️ Estos son estimados — la relación real puede variar según correlaciones y condiciones de mercado.
+            """)
+
+
+# ══════════════════════════════════════════
+#  TAB 9 — FRONTERA EFICIENTE
+# ══════════════════════════════════════════
+with tabs[8]:
+    st.subheader("🌐 Frontera Eficiente de Markowitz")
+    if st.session_state.portfolio.empty:
+        st.info("Cargá tu cartera primero")
+    elif st.session_state.hist_data is None:
+        st.warning("⬅️ Cargá datos de mercado primero")
+    else:
+        prices = st.session_state.hist_data
+        df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
+        available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
+        if len(available) < 2:
+            st.warning("Se necesitan al menos 2 activos con datos.")
+        else:
+            prices_clean = prices[available].dropna()
+            returns_fe = prices_clean.pct_change().dropna()
+            min_w = st.session_state.get('min_weight', 0.0)
+
+            with st.spinner("Calculando frontera eficiente (puede tardar ~20 segundos)..."):
+                # Random portfolios
+                n = len(available)
+                n_sim = 3000
+                rand_rets, rand_vols, rand_sharpes, rand_weights = [], [], [], []
+                np.random.seed(42)
+                for _ in range(n_sim):
+                    w = np.random.dirichlet(np.ones(n))
+                    r, v, s = portfolio_metrics(w, returns_fe, rf_rate)
+                    rand_rets.append(r*100); rand_vols.append(v*100); rand_sharpes.append(s)
+
+                # Key portfolios
+                w_ms  = max_sharpe(returns_fe, rf_rate, min_w)
+                w_mv  = min_variance(returns_fe, min_w)
+                w_act = np.array([df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]/100 for t in available])
+
+                ms_r, ms_v, ms_s = portfolio_metrics(w_ms,  returns_fe, rf_rate)
+                mv_r, mv_v, mv_s = portfolio_metrics(w_mv,  returns_fe, rf_rate)
+                ac_r, ac_v, ac_s = portfolio_metrics(w_act, returns_fe, rf_rate)
+
+            fig = go.Figure()
+
+            # Random cloud
+            fig.add_trace(go.Scatter(
+                x=rand_vols, y=rand_rets,
+                mode='markers',
+                marker=dict(size=4, color=rand_sharpes, colorscale='Viridis',
+                    showscale=True, colorbar=dict(title='Sharpe', tickfont=dict(color='#e2e8f0')),
+                    opacity=0.5),
+                name='Portfolios aleatorios', hovertemplate='Vol: %{x:.1f}%<br>Ret: %{y:.1f}%<extra></extra>'
+            ))
+
+            # Key points
+            for label, rv, rr, rs, color, sym in [
+                ('Max Sharpe',    ms_v*100, ms_r*100, ms_s, '#f87171', 'star'),
+                ('Min Varianza',  mv_v*100, mv_r*100, mv_s, '#4ade80', 'circle'),
+                ('Tu Cartera',    ac_v*100, ac_r*100, ac_s, '#00d4ff', 'x'),
+            ]:
+                fig.add_trace(go.Scatter(
+                    x=[rv], y=[rr], mode='markers+text',
+                    name=f'{label} (Sharpe: {rs:.2f})',
+                    text=[label], textposition='top center',
+                    marker=dict(size=18, color=color, symbol=sym, line=dict(width=2, color=color))
+                ))
+
+            fig.update_layout(
+                title='Espacio de Portfolios — Frontera Eficiente de Markowitz',
+                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0',
+                xaxis_title='Volatilidad Anual %', yaxis_title='Retorno Anual %',
+                legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'),
+                height=550
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Composition of key portfolios
+            st.markdown("#### Composición de portfolios óptimos")
+            col1, col2, col3 = st.columns(3)
+            for col, label, w, r, v, s, color in [
+                (col1, '🔴 Max Sharpe',   w_ms,  ms_r, ms_v, ms_s, '#f87171'),
+                (col2, '🟢 Min Varianza', w_mv,  mv_r, mv_v, mv_s, '#4ade80'),
+                (col3, '🔵 Tu Cartera',   w_act, ac_r, ac_v, ac_s, '#00d4ff'),
+            ]:
+                with col:
+                    st.markdown(f"**{label}**")
+                    st.metric("Retorno Anual", f"{r*100:.1f}%")
+                    st.metric("Volatilidad", f"{v*100:.1f}%")
+                    st.metric("Sharpe", f"{s:.2f}")
+                    df_comp = pd.DataFrame({'Ticker': available, 'Peso %': (w*100).round(1)})\
+                        .sort_values('Peso %', ascending=False)
+                    fig_comp = go.Figure(go.Bar(
+                        x=df_comp['Ticker'], y=df_comp['Peso %'],
+                        marker_color=color+'99',
+                        text=df_comp['Peso %'].astype(str)+'%', textposition='outside'
+                    ))
+                    fig_comp.update_layout(paper_bgcolor='#111827', plot_bgcolor='#111827',
+                        font_color='#e2e8f0', height=250, margin=dict(t=10,b=10),
+                        yaxis_title='%', showlegend=False)
+                    st.plotly_chart(fig_comp, use_container_width=True)
+
+            with st.expander("📖 ¿Cómo interpretar la Frontera Eficiente?"):
+                st.markdown("""
+- Cada punto del gráfico representa un **portfolio posible** con distintas combinaciones de pesos.
+- El **color** de cada punto indica su Sharpe Ratio (más amarillo = mejor relación riesgo/retorno).
+- La **curva superior izquierda** de puntos forma la Frontera Eficiente — son los portfolios que maximizan retorno para cada nivel de riesgo.
+- **Max Sharpe** ⭐: el portfolio con la mejor relación retorno/riesgo.
+- **Min Varianza** 🟢: el portfolio más conservador — menor volatilidad posible.
+- **Tu Cartera** 🔵: dónde está tu distribución actual en este espacio.
+- Si tu cartera está lejos de la frontera, existe un portfolio más eficiente con el mismo riesgo pero mayor retorno.
+                """)
+
+
 
 # ══════════════════════════════════════════
 #  TAB 7 — BLACK-LITTERMAN
 # ══════════════════════════════════════════
-with tabs[6]:
+with tabs[9]:
     st.subheader("🧠 Black-Litterman")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1089,7 +1397,7 @@ with tabs[6]:
 # ══════════════════════════════════════════
 #  TAB 8 — MONTE CARLO
 # ══════════════════════════════════════════
-with tabs[7]:
+with tabs[10]:
     st.subheader("🎲 Monte Carlo")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")

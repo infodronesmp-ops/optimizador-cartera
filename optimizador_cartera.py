@@ -703,7 +703,7 @@ with tabs[2]:
                 marker_color='rgba(255,107,53,0.65)'))
             fig.update_layout(barmode='group', title='Tenencia Actual vs Target',
                 paper_bgcolor='#111827', plot_bgcolor='#111827',
-                font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%')
+                font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%', legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
             st.plotly_chart(fig, use_container_width=True)
 
         with col2:
@@ -968,7 +968,7 @@ with tabs[5]:
         ))
         fig2.update_layout(title='CAGR anualizado',
             paper_bgcolor='#111827', plot_bgcolor='#111827',
-            font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%')
+            font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%', legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
         st.plotly_chart(fig2, use_container_width=True)
 
         with st.expander("📖 ¿Cómo interpretar este gráfico?"):
@@ -1350,7 +1350,7 @@ with tabs[9]:
                     textposition='outside'))
                 fig.update_layout(title='Delta BL (Posterior − Prior)',
                     paper_bgcolor='#111827', plot_bgcolor='#111827',
-                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='puntos % anual')
+                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='puntos % anual', legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
                 st.plotly_chart(fig, use_container_width=True)
 
             with col2:
@@ -1361,7 +1361,7 @@ with tabs[9]:
                     y=bl_df['Peso BL %'], marker_color='rgba(255,107,53,.7)'))
                 fig2.update_layout(barmode='group', title='Pesos: Actual vs BL Óptimo',
                     paper_bgcolor='#111827', plot_bgcolor='#111827',
-                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%')
+                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%', legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
                 st.plotly_chart(fig2, use_container_width=True)
 
             # Frontier scatter
@@ -1387,7 +1387,8 @@ with tabs[9]:
                         line=dict(width=2, color=color))))
             fig3.update_layout(title='Frontera Eficiente: Actual vs BL vs MinVar',
                 paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
-                xaxis_title='Volatilidad %', yaxis_title='Retorno %')
+                xaxis_title='Volatilidad %', yaxis_title='Retorno %',
+                legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
             st.plotly_chart(fig3, use_container_width=True)
 
             # Store for MC — prefer target return portfolio if set
@@ -1395,6 +1396,17 @@ with tabs[9]:
             st.session_state['bl_stats'] = {
                 'ret_bl': best[0], 'vol_bl': best[1]
             }
+
+            with st.expander("📖 ¿Cómo interpretar Black-Litterman?"):
+                st.markdown("""
+- **Black-Litterman** combina el equilibrio del mercado con tus propias expectativas (views) para calcular pesos óptimos.
+- **Prior (equilibrio)**: es el retorno implícito que el mercado "espera" de cada activo basado en su comportamiento histórico.
+- **Posterior BL**: es el retorno ajustado incorporando tu view. Si confiás 100% en tu view, el posterior = tu expectativa. Si confiás 0%, el posterior = el prior del mercado.
+- **Delta %**: cuánto cambió la expectativa de retorno al incorporar tu view. Verde = subió, rojo = bajó.
+- **Peso BL %**: la asignación óptima que maximiza el Sharpe con los retornos posteriores. Cuanto mayor el retorno esperado ajustado y menor la correlación con el resto, mayor será el peso sugerido.
+- **Confianza 0–1**: 0 = ignorás tu view completamente, 1 = confiás ciegamente en tu expectativa.
+- 💡 Tip: empezá con confianza 0.5–0.7 y ajustá según qué tan seguro estás de tu análisis.
+                """)
 
 
 # ══════════════════════════════════════════
@@ -1447,7 +1459,8 @@ with tabs[10]:
                 title=f'Proyección Monte Carlo ({int(n_days)} días) — Capital inicial: {fmt_usd(total)}',
                 paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
                 xaxis_title='Días de Trading', yaxis_title='Valor USD',
-                yaxis=dict(tickformat='$,.0f'))
+                yaxis=dict(tickformat='$,.0f'),
+                legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
             st.plotly_chart(fig, use_container_width=True)
 
             final_act = paths_act[:, -1]
@@ -1481,7 +1494,8 @@ with tabs[10]:
                     marker_color='rgba(255,107,53,0.55)'))
                 fig2.update_layout(barmode='overlay', title='Distribución de valor final',
                     paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
-                    xaxis=dict(tickformat='$,.0f'), yaxis_title='Frecuencia')
+                    xaxis=dict(tickformat='$,.0f'), yaxis_title='Frecuencia',
+                    legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
                 st.plotly_chart(fig2, use_container_width=True)
 
             with col2:
@@ -1495,5 +1509,21 @@ with tabs[10]:
                     name='BL Optim', marker_color='rgba(255,107,53,0.7)'))
                 fig3.update_layout(barmode='group', title='Percentiles de resultado',
                     paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
-                    yaxis=dict(tickformat='$,.0f'))
+                    yaxis=dict(tickformat='$,.0f'),
+                    legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
                 st.plotly_chart(fig3, use_container_width=True)
+
+            with st.expander("📖 ¿Cómo interpretar Monte Carlo?"):
+                st.markdown("""
+- La simulación genera **500 trayectorias posibles** de tu cartera durante 1 año (252 días hábiles), usando el retorno y volatilidad históricos.
+- **Línea azul** = trayectoria promedio de tu cartera actual.
+- **Línea naranja** = trayectoria promedio de la cartera optimizada con Black-Litterman.
+- Las trayectorias tenues de fondo muestran la dispersión real de escenarios posibles — arriba y abajo.
+- **Distribución final**: el histograma muestra en cuántas simulaciones terminaste en cada rango de valor. Una distribución más ancha = más incertidumbre.
+- **Percentiles**:
+  - P5 = peor escenario probable (solo 5% de simulaciones terminaron peor que esto)
+  - P50 = resultado mediano esperado
+  - P95 = mejor escenario probable (solo 5% terminaron mejor que esto)
+- 💡 La diferencia entre la cartera Actual y BL Optimizada refleja el impacto de los pesos sugeridos por Black-Litterman.
+- ⚠️ Monte Carlo asume retornos normales y distribución estable — en crisis reales, las colas son más gruesas.
+                """)

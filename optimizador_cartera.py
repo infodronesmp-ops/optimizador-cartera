@@ -49,14 +49,34 @@ st.markdown("""
 # ─────────────────────────────────────────
 #  SESSION STATE
 # ─────────────────────────────────────────
+
+# Cartera preseteada por defecto — el usuario puede modificarla y guardar cambios
+DEFAULT_PORTFOLIO = pd.DataFrame([
+    {'Ticker':'GOOGL','Monto_USD':25000,'Target_%':23,'Sector':'Comunicaciones'},
+    {'Ticker':'ASML', 'Monto_USD':15000,'Target_%':14,'Sector':'Tecnología'},
+    {'Ticker':'FXI',  'Monto_USD':12000,'Target_%':10,'Sector':'Brasil/EM'},
+    {'Ticker':'EWZ',  'Monto_USD':10000,'Target_%':10,'Sector':'Brasil/EM'},
+    {'Ticker':'XLV',  'Monto_USD':8000, 'Target_%':6, 'Sector':'Salud'},
+    {'Ticker':'META', 'Monto_USD':6000, 'Target_%':8, 'Sector':'Comunicaciones'},
+    {'Ticker':'MSFT', 'Monto_USD':4000, 'Target_%':5, 'Sector':'Tecnología'},
+    {'Ticker':'IBM',  'Monto_USD':4000, 'Target_%':5.4,'Sector':'Tecnología'},
+    {'Ticker':'PANW', 'Monto_USD':4000, 'Target_%':5, 'Sector':'Tecnología'},
+    {'Ticker':'JPM',  'Monto_USD':3000, 'Target_%':2.8,'Sector':'Financiero'},
+    {'Ticker':'V',    'Monto_USD':3000, 'Target_%':4, 'Sector':'Financiero'},
+    {'Ticker':'RTX',  'Monto_USD':3000, 'Target_%':3, 'Sector':'Defensa'},
+    {'Ticker':'CEG',  'Monto_USD':3000, 'Target_%':3.8,'Sector':'Energía'},
+])
+
+DEFAULT_SECTORS = [
+    'Tecnología','Comunicaciones','Salud','Financiero',
+    'Energía','Consumo','Industriales','Brasil/EM',
+    'Minería/Cobre','Defensa','Otro'
+]
+
 if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = pd.DataFrame(columns=['Ticker','Monto_USD','Target_%','Sector'])
+    st.session_state.portfolio = DEFAULT_PORTFOLIO.copy()
 if 'sectors' not in st.session_state:
-    st.session_state.sectors = [
-        'Tecnología','Comunicaciones','Salud','Financiero',
-        'Energía','Consumo','Industriales','Brasil/EM',
-        'Minería/Cobre','Defensa','Otro'
-    ]
+    st.session_state.sectors = DEFAULT_SECTORS.copy()
 if 'hist_data' not in st.session_state:
     st.session_state.hist_data = None
 if 'tickers_loaded' not in st.session_state:
@@ -76,12 +96,20 @@ def fmt_pct(v):
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_data(tickers, period="5y"):
     """Fetch historical closing prices from Yahoo Finance."""
+    # Clean tickers — remove None, empty, whitespace-only
+    tickers = [str(t).strip().upper() for t in tickers if t and str(t).strip()]
+    if not tickers:
+        st.error("No hay tickers válidos para descargar.")
+        return None
     try:
         raw = yf.download(tickers, period=period, auto_adjust=True, progress=False)
         if isinstance(raw.columns, pd.MultiIndex):
             prices = raw['Close']
         else:
             prices = raw[['Close']] if 'Close' in raw.columns else raw
+        # If only one ticker, ensure column name matches
+        if len(tickers) == 1 and isinstance(prices, pd.DataFrame):
+            prices.columns = tickers
         prices = prices.dropna(how='all')
         return prices
     except Exception as e:
@@ -422,22 +450,8 @@ with tabs[0]:
 
     st.markdown("---")
 
-    if st.button("📋 Cargar ejemplo"):
-        st.session_state.portfolio = pd.DataFrame([
-            {'Ticker':'GOOGL','Monto_USD':25000,'Target_%':23,'Sector':'Comunicaciones'},
-            {'Ticker':'ASML', 'Monto_USD':15000,'Target_%':14,'Sector':'Tecnología'},
-            {'Ticker':'FXI',  'Monto_USD':12000,'Target_%':10,'Sector':'Brasil/EM'},
-            {'Ticker':'EWZ',  'Monto_USD':10000,'Target_%':10,'Sector':'Brasil/EM'},
-            {'Ticker':'XLV',  'Monto_USD':8000, 'Target_%':6, 'Sector':'Salud'},
-            {'Ticker':'META', 'Monto_USD':6000, 'Target_%':8, 'Sector':'Comunicaciones'},
-            {'Ticker':'MSFT', 'Monto_USD':4000, 'Target_%':5, 'Sector':'Tecnología'},
-            {'Ticker':'IBM',  'Monto_USD':4000, 'Target_%':5.4,'Sector':'Tecnología'},
-            {'Ticker':'PANW', 'Monto_USD':4000, 'Target_%':5, 'Sector':'Tecnología'},
-            {'Ticker':'JPM',  'Monto_USD':3000, 'Target_%':2.8,'Sector':'Financiero'},
-            {'Ticker':'V',    'Monto_USD':3000, 'Target_%':4, 'Sector':'Financiero'},
-            {'Ticker':'RTX',  'Monto_USD':3000, 'Target_%':3, 'Sector':'Defensa'},
-            {'Ticker':'CEG',  'Monto_USD':3000, 'Target_%':3.8,'Sector':'Energía'},
-        ])
+    if st.button("🔄 Restaurar cartera de ejemplo"):
+        st.session_state.portfolio = DEFAULT_PORTFOLIO.copy()
         st.rerun()
 
     if not st.session_state.portfolio.empty:
@@ -460,16 +474,19 @@ with tabs[0]:
         # Editable table
         st.markdown("#### Editá tu cartera")
 
-        # ✅ Fix 2: selector de orden
+        # Sort controls
         sort_col_map = {
-            'Ticker (A→Z)': ('Ticker', True),
-            'Monto USD (mayor→menor)': ('Monto_USD', False),
-            'Peso Actual % (mayor→menor)': ('Peso_Actual_%', False),
-            'Desvío % (mayor→menor)': ('Desvio_%', False),
-            'Sector (A→Z)': ('Sector', True),
+            'Monto USD': 'Monto_USD',
+            'Peso Actual %': 'Peso_Actual_%',
+            'Target %': 'Target_%',
+            'Desvío %': 'Desvio_%',
+            'Ticker': 'Ticker',
+            'Sector': 'Sector',
         }
-        sort_choice = st.selectbox("Ordenar por", list(sort_col_map.keys()), index=1, key="sort_portfolio")
-        sort_field, sort_asc = sort_col_map[sort_choice]
+        sc1, sc2 = st.columns([3,1])
+        sort_choice = sc1.selectbox("Ordenar por", list(sort_col_map.keys()), index=0, key="sort_portfolio")
+        sort_asc = sc2.selectbox("Orden", ["↓ Mayor→Menor", "↑ Menor→Mayor"], key="sort_dir") == "↑ Menor→Mayor"
+        sort_field = sort_col_map[sort_choice]
         df_sorted = df[['Ticker','Monto_USD','Target_%','Sector','Peso_Actual_%','Desvio_%']].round(2).sort_values(sort_field, ascending=sort_asc)
 
         edited = st.data_editor(
@@ -488,9 +505,28 @@ with tabs[0]:
             key="portfolio_editor"
         )
         if st.button("💾 Guardar cambios"):
-            st.session_state.portfolio = edited[['Ticker','Monto_USD','Target_%','Sector']].copy()
-            st.session_state.portfolio['Ticker'] = st.session_state.portfolio['Ticker'].str.upper().str.strip()
-            st.rerun()
+            edited_clean = edited[['Ticker','Monto_USD','Target_%','Sector']].copy()
+            edited_clean['Ticker'] = edited_clean['Ticker'].astype(str).str.upper().str.strip()
+            edited_clean = edited_clean[edited_clean['Ticker'].str.match(r'^[A-Z0-9.\-]{1,10}$', na=False)]
+            # Validate any NEW tickers not already in portfolio
+            old_tickers = set(st.session_state.portfolio['Ticker'].values)
+            new_tickers = [t for t in edited_clean['Ticker'].values if t not in old_tickers]
+            invalid = []
+            if new_tickers:
+                with st.spinner(f"Validando tickers nuevos: {', '.join(new_tickers)}..."):
+                    for t in new_tickers:
+                        try:
+                            info = yf.Ticker(t).fast_info
+                            if not (hasattr(info, 'last_price') and info.last_price and info.last_price > 0):
+                                invalid.append(t)
+                        except:
+                            invalid.append(t)
+            if invalid:
+                st.error(f"❌ Tickers no encontrados en Yahoo Finance: **{', '.join(invalid)}** — corregí o eliminá esas filas antes de guardar.")
+            else:
+                st.session_state.portfolio = edited_clean
+                st.success("✅ Cambios guardados")
+                st.rerun()
 
         col_exp1, col_exp2 = st.columns(2)
         with col_exp1:
@@ -736,7 +772,7 @@ with tabs[3]:
         if len(available) < 2:
             st.warning("Se necesitan al menos 2 tickers con datos disponibles")
         else:
-            prices_clean = prices[available].dropna()
+            prices_clean = prices[available].ffill().bfill().dropna(how='all')
             returns = prices_clean.pct_change().dropna()
             corr = returns.corr().round(3)
 
@@ -811,7 +847,17 @@ with tabs[4]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
-        prices_clean = prices[available].dropna()
+        prices_clean = prices[available].ffill().bfill().dropna(how='all')
+        # Drop tickers with fewer than 30 data points
+        valid_tickers = [t for t in available if prices_clean[t].notna().sum() >= 30]
+        dropped = [t for t in available if t not in valid_tickers]
+        if dropped:
+            st.warning(f"⚠️ Sin datos suficientes (excluidos del cálculo): {', '.join(dropped)}")
+        available = valid_tickers
+        if not available:
+            st.error("❌ Ningún ticker tiene datos suficientes. Probá aumentar los años de historia en el panel lateral.")
+            st.stop()
+        prices_clean = prices_clean[available]
 
         with st.spinner("Calculando métricas..."):
             try:
@@ -902,7 +948,7 @@ with tabs[5]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
-        prices_clean = prices[available].dropna()
+        prices_clean = prices[available].ffill().bfill().dropna(how='all')
 
         weights_actual = np.array([df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]/100
             for t in available])
@@ -994,7 +1040,7 @@ with tabs[6]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
-        prices_clean = prices[available].dropna()
+        prices_clean = prices[available].ffill().bfill().dropna(how='all')
         returns_all = prices_clean.pct_change().dropna()
 
         weights_actual = np.array([df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]/100
@@ -1180,7 +1226,7 @@ with tabs[8]:
         if len(available) < 2:
             st.warning("Se necesitan al menos 2 activos con datos.")
         else:
-            prices_clean = prices[available].dropna()
+            prices_clean = prices[available].ffill().bfill().dropna(how='all')
             returns_fe = prices_clean.pct_change().dropna()
             min_w = st.session_state.get('min_weight', 0.0)
 
@@ -1292,7 +1338,7 @@ with tabs[9]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
-        prices_clean = prices[available].dropna()
+        prices_clean = prices[available].ffill().bfill().dropna(how='all')
         returns = prices_clean.pct_change().dropna()
 
         st.markdown("#### Ingresá tus views (expectativas de retorno)")

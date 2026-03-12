@@ -81,6 +81,17 @@ if 'hist_data' not in st.session_state:
     st.session_state.hist_data = None
 if 'tickers_loaded' not in st.session_state:
     st.session_state.tickers_loaded = []
+# Catálogo maestro de instrumentos — persiste independiente de la cartera
+if 'instruments' not in st.session_state:
+    st.session_state.instruments = DEFAULT_PORTFOLIO[['Ticker','Sector']].copy().reset_index(drop=True)
+
+def sync_instrument(ticker, sector=""):
+    """Agrega un ticker al catálogo si no existe."""
+    if ticker and ticker not in st.session_state.instruments['Ticker'].values:
+        new_row = pd.DataFrame([{'Ticker': ticker, 'Sector': sector}])
+        st.session_state.instruments = pd.concat(
+            [st.session_state.instruments, new_row], ignore_index=True
+        )
 
 # ─────────────────────────────────────────
 #  HELPERS
@@ -354,6 +365,7 @@ st.markdown("---")
 #  TABS
 # ─────────────────────────────────────────
 tabs = st.tabs([
+    "📋 Instrumentos",
     "📁 Mi Cartera",
     "🏷️ Sectores",
     "⚖️ Rebalanceo",
@@ -367,85 +379,155 @@ tabs = st.tabs([
     "🎲 Monte Carlo",
 ])
 
+
+# ══════════════════════════════════════════
+#  TAB 0 — INSTRUMENTOS (catálogo maestro)
+# ══════════════════════════════════════════
+with tabs[0]:
+    st.subheader("📋 Catálogo de Instrumentos")
+    st.markdown("Acá cargás tus instrumentos **una sola vez**. Quedan guardados y disponibles para armar tu cartera.")
+
+    # ── Agregar instrumento al catálogo ──
+    st.markdown("#### Agregar instrumento al catálogo")
+    with st.form("add_instrument_form"):
+        ci1, ci2, ci3 = st.columns([1.5, 2, 1])
+        inst_ticker = ci1.text_input("Ticker", placeholder="AAPL").upper().strip()
+        inst_sector = ci2.selectbox("Sector", [""] + st.session_state.sectors)
+        inst_submit = ci3.form_submit_button("➕ Agregar", type="primary")
+
+    if inst_submit and inst_ticker:
+        import re
+        if not re.match(r'^[A-Z0-9.\-]{1,10}$', inst_ticker):
+            st.error("⚠️ Formato de ticker inválido")
+        elif inst_ticker in st.session_state.instruments['Ticker'].values:
+            st.warning(f"⚠️ **{inst_ticker}** ya está en el catálogo")
+        else:
+            with st.spinner(f"Verificando {inst_ticker} en Yahoo Finance..."):
+                try:
+                    info = yf.Ticker(inst_ticker).fast_info
+                    ticker_ok = hasattr(info, 'last_price') and info.last_price and info.last_price > 0
+                except:
+                    ticker_ok = False
+            if not ticker_ok:
+                st.error(f"❌ **{inst_ticker}** no se encontró en Yahoo Finance")
+            else:
+                new_inst = pd.DataFrame([{'Ticker': inst_ticker, 'Sector': inst_sector}])
+                st.session_state.instruments = pd.concat(
+                    [st.session_state.instruments, new_inst], ignore_index=True
+                )
+                st.success(f"✅ **{inst_ticker}** agregado al catálogo")
+                st.rerun()
+
+    st.markdown("---")
+
+    # ── Tabla del catálogo ──
+    st.markdown(f"#### Mis instrumentos ({len(st.session_state.instruments)} cargados)")
+
+    inst_edited = st.data_editor(
+        st.session_state.instruments.copy(),
+        column_config={
+            'Ticker': st.column_config.TextColumn('Ticker', width='small', disabled=True),
+            'Sector': st.column_config.SelectboxColumn('Sector', options=[""] + st.session_state.sectors, width='medium'),
+        },
+        hide_index=True,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="instruments_editor"
+    )
+
+    col_save, col_restore = st.columns([1,1])
+    with col_save:
+        if st.button("💾 Guardar cambios del catálogo", type="primary"):
+            inst_edited_clean = inst_edited.dropna(subset=['Ticker'])
+            inst_edited_clean['Ticker'] = inst_edited_clean['Ticker'].astype(str).str.upper().str.strip()
+            inst_edited_clean = inst_edited_clean[inst_edited_clean['Ticker'].str.match(r'^[A-Z0-9.\-]{1,10}$', na=False)]
+            st.session_state.instruments = inst_edited_clean.reset_index(drop=True)
+            st.success("✅ Catálogo actualizado")
+            st.rerun()
+    with col_restore:
+        if st.button("🔄 Restaurar catálogo original"):
+            st.session_state.instruments = DEFAULT_PORTFOLIO[['Ticker','Sector']].copy().reset_index(drop=True)
+            st.success("✅ Catálogo restaurado")
+            st.rerun()
+
+    st.info("💡 Los instrumentos del catálogo están disponibles en **Mi Cartera** para seleccionarlos con un click.")
+
 # ══════════════════════════════════════════
 #  TAB 1 — MI CARTERA
 # ══════════════════════════════════════════
-with tabs[0]:
+with tabs[1]:
     st.subheader("📁 Mi Cartera")
 
-    col1, col2 = st.columns([1,1])
+    # ── Agregar desde catálogo ──
+    col1, col2 = st.columns([1.2, 1])
     with col1:
-        st.markdown("#### Cargar desde Excel")
-        uploaded = st.file_uploader(
-            "Subí tu Excel (.xlsx) con columnas: Ticker, Monto_USD, Target_%, Sector (opcional)",
-            type=['xlsx','xls','csv']
-        )
-        if uploaded:
-            try:
-                if uploaded.name.endswith('.csv'):
-                    df_up = pd.read_csv(uploaded)
-                else:
-                    df_up = pd.read_excel(uploaded)
-                df_up.columns = [c.strip() for c in df_up.columns]
-                # Normalize column names
-                rename_map = {}
-                for c in df_up.columns:
-                    cl = c.lower().replace(' ','_')
-                    if 'ticker' in cl: rename_map[c] = 'Ticker'
-                    elif 'monto' in cl or 'usd' in cl: rename_map[c] = 'Monto_USD'
-                    elif 'target' in cl: rename_map[c] = 'Target_%'
-                    elif 'sector' in cl: rename_map[c] = 'Sector'
-                df_up = df_up.rename(columns=rename_map)
-                if 'Sector' not in df_up.columns: df_up['Sector'] = ''
-                df_up['Ticker'] = df_up['Ticker'].astype(str).str.upper().str.strip()
-                df_up = df_up[['Ticker','Monto_USD','Target_%','Sector']].dropna(subset=['Ticker','Monto_USD'])
-                # Check duplicates
-                dupes = df_up[df_up.duplicated('Ticker', keep=False)]['Ticker'].unique()
-                if len(dupes) > 0:
-                    st.warning(f"⚠️ Tickers duplicados encontrados: {', '.join(dupes)} — se unificarán sumando montos")
-                    df_up = df_up.groupby('Ticker', as_index=False).agg({
-                        'Monto_USD':'sum', 'Target_%':'sum', 'Sector':'first'
-                    })
-                st.session_state.portfolio = df_up
-                st.success(f"✅ {len(df_up)} activos cargados")
-            except Exception as e:
-                st.error(f"Error al leer el archivo: {e}")
+        st.markdown("#### Agregar desde catálogo de instrumentos")
+        # Instruments not yet in portfolio
+        in_portfolio = set(st.session_state.portfolio['Ticker'].values)
+        available_inst = [
+            t for t in st.session_state.instruments['Ticker'].values
+            if t not in in_portfolio
+        ]
+        if available_inst:
+            with st.form("add_from_catalog"):
+                fc1, fc2, fc3 = st.columns([1.5, 1.2, 1])
+                sel_ticker = fc1.selectbox("Instrumento", available_inst)
+                sel_monto  = fc2.number_input("Monto USD", min_value=0.0, step=100.0, value=1000.0)
+                sel_target = fc3.number_input("Target %", min_value=0.0, max_value=100.0, step=0.5)
+                cat_submit = st.form_submit_button("➕ Agregar a mi cartera", type="primary")
+            if cat_submit and sel_ticker:
+                sel_sector = st.session_state.instruments[
+                    st.session_state.instruments['Ticker']==sel_ticker
+                ]['Sector'].values[0]
+                new_row = pd.DataFrame([{
+                    'Ticker': sel_ticker, 'Monto_USD': sel_monto,
+                    'Target_%': sel_target, 'Sector': sel_sector
+                }])
+                st.session_state.portfolio = pd.concat(
+                    [st.session_state.portfolio, new_row], ignore_index=True
+                )
+                st.success(f"✅ {sel_ticker} agregado a tu cartera")
+                st.rerun()
+        else:
+            st.info("Todos los instrumentos del catálogo ya están en tu cartera.")
 
     with col2:
-        st.markdown("#### Agregar activo manualmente")
-        with st.form("add_asset"):
-            c1, c2, c3, c4 = st.columns([1.2,1.2,1,1.5])
-            new_ticker = c1.text_input("Ticker", placeholder="AAPL").upper().strip()
-            new_monto = c2.number_input("Monto USD", min_value=0.0, step=100.0)
-            new_target = c3.number_input("Target %", min_value=0.0, max_value=100.0, step=0.5)
-            new_sector = c4.selectbox("Sector", [""] + st.session_state.sectors)
-            submitted = st.form_submit_button("➕ Agregar", type="primary")
+        st.markdown("#### Ticker nuevo (no está en catálogo)")
+        with st.form("add_new_ticker"):
+            n1, n2, n3 = st.columns([1.2, 1, 1])
+            new_ticker = n1.text_input("Ticker", placeholder="AAPL").upper().strip()
+            new_monto  = n2.number_input("Monto USD", min_value=0.0, step=100.0, value=1000.0)
+            new_target = n3.number_input("Target %", min_value=0.0, max_value=100.0, step=0.5)
+            new_sector = st.selectbox("Sector (se guardará en catálogo)", [""] + st.session_state.sectors)
+            new_submit = st.form_submit_button("➕ Agregar y guardar en catálogo", type="primary")
 
-        # Handle outside form to allow st.rerun()
-        if submitted and new_ticker:
+        if new_submit and new_ticker:
             import re
             if not re.match(r'^[A-Z0-9.\-]{1,10}$', new_ticker):
                 st.error("⚠️ Formato de ticker inválido")
+            elif new_ticker in st.session_state.portfolio['Ticker'].values:
+                st.warning(f"⚠️ {new_ticker} ya está en tu cartera")
             else:
-                # Validate ticker exists on Yahoo Finance
-                with st.spinner(f"Verificando {new_ticker}..."):
+                with st.spinner(f"Verificando {new_ticker} en Yahoo Finance..."):
                     try:
                         info = yf.Ticker(new_ticker).fast_info
                         ticker_ok = hasattr(info, 'last_price') and info.last_price and info.last_price > 0
                     except:
                         ticker_ok = False
                 if not ticker_ok:
-                    st.error(f"❌ **{new_ticker}** no se encontró en Yahoo Finance — verificá que el ticker sea correcto (ej: TSLA, no TESLA)")
-                elif new_ticker in st.session_state.portfolio['Ticker'].values:
-                    idx = st.session_state.portfolio[st.session_state.portfolio['Ticker']==new_ticker].index[0]
-                    st.session_state.portfolio.loc[idx,'Monto_USD'] += new_monto
-                    st.session_state.portfolio.loc[idx,'Target_%'] += new_target
-                    st.warning(f"⚠️ {new_ticker} ya existía — se sumó el monto y target")
-                    st.rerun()
+                    st.error(f"❌ **{new_ticker}** no se encontró en Yahoo Finance")
                 else:
-                    new_row = pd.DataFrame([{'Ticker':new_ticker,'Monto_USD':new_monto,'Target_%':new_target,'Sector':new_sector}])
-                    st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_row], ignore_index=True)
-                    st.success(f"✅ {new_ticker} agregado correctamente")
+                    # Add to portfolio
+                    new_row = pd.DataFrame([{
+                        'Ticker': new_ticker, 'Monto_USD': new_monto,
+                        'Target_%': new_target, 'Sector': new_sector
+                    }])
+                    st.session_state.portfolio = pd.concat(
+                        [st.session_state.portfolio, new_row], ignore_index=True
+                    )
+                    # Sync to instruments catalog
+                    sync_instrument(new_ticker, new_sector)
+                    st.success(f"✅ {new_ticker} agregado a tu cartera y al catálogo")
                     st.rerun()
 
     st.markdown("---")
@@ -504,7 +586,8 @@ with tabs[0]:
             use_container_width=True,
             key="portfolio_editor"
         )
-        if st.button("💾 Guardar cambios"):
+        st.warning("⚠️ **Acordate de guardar** — cualquier cambio en la tabla recién se aplica al hacer click en el botón de abajo.")
+        if st.button("💾 Guardar cambios en mi cartera", type="primary"):
             edited_clean = edited[['Ticker','Monto_USD','Target_%','Sector']].copy()
             edited_clean['Ticker'] = edited_clean['Ticker'].astype(str).str.upper().str.strip()
             edited_clean = edited_clean[edited_clean['Ticker'].str.match(r'^[A-Z0-9.\-]{1,10}$', na=False)]
@@ -524,8 +607,11 @@ with tabs[0]:
             if invalid:
                 st.error(f"❌ Tickers no encontrados en Yahoo Finance: **{', '.join(invalid)}** — corregí o eliminá esas filas antes de guardar.")
             else:
+                # Sync any new tickers to instruments catalog
+                for _, row in edited_clean.iterrows():
+                    sync_instrument(row['Ticker'], row.get('Sector',''))
                 st.session_state.portfolio = edited_clean
-                st.success("✅ Cambios guardados")
+                st.success("✅ Cambios guardados — nuevos tickers sincronizados al catálogo")
                 st.rerun()
 
         col_exp1, col_exp2 = st.columns(2)
@@ -544,7 +630,7 @@ with tabs[0]:
 # ══════════════════════════════════════════
 #  TAB 2 — SECTORES
 # ══════════════════════════════════════════
-with tabs[1]:
+with tabs[2]:
     st.subheader("🏷️ Análisis por Sector")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -694,7 +780,7 @@ with tabs[1]:
 # ══════════════════════════════════════════
 #  TAB 3 — REBALANCEO
 # ══════════════════════════════════════════
-with tabs[2]:
+with tabs[3]:
     st.subheader("⚖️ Rebalanceo")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -760,7 +846,7 @@ with tabs[2]:
 # ══════════════════════════════════════════
 #  TAB 4 — CORRELACIÓN
 # ══════════════════════════════════════════
-with tabs[3]:
+with tabs[4]:
     st.subheader("🔗 Correlación (datos reales)")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -837,7 +923,7 @@ with tabs[3]:
 - ⚠️ Correlación **>0.80** es una alerta: esos activos se comportan casi igual y no agregan diversificación real.
 - El gráfico de correlación móvil muestra si la relación entre dos activos cambia con el tiempo — lo ideal es que sea estable y baja.
             """)
-with tabs[4]:
+with tabs[5]:
     st.subheader("📐 Métricas reales")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -938,7 +1024,7 @@ with tabs[4]:
 # ══════════════════════════════════════════
 #  TAB 6 — RENDIMIENTO
 # ══════════════════════════════════════════
-with tabs[5]:
+with tabs[6]:
     st.subheader("📈 Rendimiento acumulado")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1030,7 +1116,7 @@ with tabs[5]:
 # ══════════════════════════════════════════
 #  TAB 7 — VaR
 # ══════════════════════════════════════════
-with tabs[6]:
+with tabs[7]:
     st.subheader("⚠️ Value at Risk (VaR) — 95% de confianza")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1106,7 +1192,7 @@ with tabs[6]:
 # ══════════════════════════════════════════
 #  TAB 6 — STRESS TEST
 # ══════════════════════════════════════════
-with tabs[7]:
+with tabs[8]:
     st.subheader("🔥 Stress Test")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1213,7 +1299,7 @@ with tabs[7]:
 # ══════════════════════════════════════════
 #  TAB 9 — FRONTERA EFICIENTE
 # ══════════════════════════════════════════
-with tabs[8]:
+with tabs[9]:
     st.subheader("🌐 Frontera Eficiente de Markowitz")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1328,7 +1414,7 @@ with tabs[8]:
 # ══════════════════════════════════════════
 #  TAB 7 — BLACK-LITTERMAN
 # ══════════════════════════════════════════
-with tabs[9]:
+with tabs[10]:
     st.subheader("🧠 Black-Litterman")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1458,7 +1544,7 @@ with tabs[9]:
 # ══════════════════════════════════════════
 #  TAB 8 — MONTE CARLO
 # ══════════════════════════════════════════
-with tabs[10]:
+with tabs[11]:
     st.subheader("🎲 Monte Carlo")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")

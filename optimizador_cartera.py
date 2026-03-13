@@ -745,44 +745,53 @@ with tabs[1]:
                             st.session_state.balanz_data        = df_balanz
                             st.session_state.balanz_usd_tickers = usd_reales
 
-                            # ── Poblar Mi Cartera automáticamente ──
-                            total_pesos = df_balanz['V_Actual_Pesos'].sum()
+                            # Tipos que NO van al análisis cuantitativo
+                            EXCLUIR_ANALISIS = {'Bonos en U$', 'FCI Money Market', 'Plazo Fijo',
+                                                'U$ efectivo', '$ Efectivo', 'Bitcoin'}
+
+                            # ── Solo renta variable para cartera de análisis ──
+                            df_rv = df_balanz[df_balanz['Renta'].str.strip() == 'Variable'].copy()
+                            total_rv_pesos = df_rv['V_Actual_Pesos'].sum()
+
                             portfolio_rows = []
-                            for _, irow in df_balanz.iterrows():
-                                ticker    = irow['Ticker']
-                                monto_usd = round(irow['V_Actual_Pesos'] / tc_input, 2)
-                                target_pct = round(irow['V_Actual_Pesos'] / total_pesos * 100, 2) if total_pesos > 0 else 0
+                            inst_rows      = []
+                            for _, irow in df_rv.iterrows():
+                                instrumento = str(irow.get('Instrumento', '')).strip()
+                                if instrumento in EXCLUIR_ANALISIS:
+                                    continue
+                                ticker_orig = irow['Ticker']
+                                # Acciones ARG → agregar .BA para Yahoo Finance
+                                if instrumento == 'Acciones ARG':
+                                    ticker_yf = ticker_orig + '.BA'
+                                else:
+                                    ticker_yf = ticker_orig  # Cedears ya están en YF
+
+                                monto_usd  = round(irow['V_Actual_Pesos'] / tc_input, 2)
+                                target_pct = round(irow['V_Actual_Pesos'] / total_rv_pesos * 100, 2) if total_rv_pesos > 0 else 0
                                 sector = str(irow['Sector_Macro']).strip()
                                 if not sector or sector in ['0','None','nan']:
                                     sector = str(irow['Sector_Detalle']).strip()
                                 if not sector or sector in ['0','None','nan']:
                                     sector = 'Otro'
+
                                 portfolio_rows.append({
-                                    'Ticker':    ticker,
+                                    'Ticker':    ticker_yf,
                                     'Monto_USD': monto_usd,
                                     'Target_%':  target_pct,
                                     'Sector':    sector,
                                 })
-                            st.session_state.portfolio = pd.DataFrame(portfolio_rows)
+                                inst_rows.append({'Ticker': ticker_yf, 'Sector': sector})
 
-                            # ── Poblar Catálogo de Instrumentos ──
-                            inst_rows = []
-                            for _, irow in df_balanz.iterrows():
-                                sector = str(irow['Sector_Macro']).strip()
-                                if not sector or sector in ['0','None','nan']:
-                                    sector = str(irow['Sector_Detalle']).strip()
-                                if not sector or sector in ['0','None','nan']:
-                                    sector = 'Otro'
-                                inst_rows.append({'Ticker': irow['Ticker'], 'Sector': sector})
-                            st.session_state.instruments = pd.DataFrame(inst_rows).drop_duplicates('Ticker')
+                            st.session_state.portfolio    = pd.DataFrame(portfolio_rows)
+                            st.session_state.instruments  = pd.DataFrame(inst_rows).drop_duplicates('Ticker')
 
-                            # ── Poblar Sectores ──
+                            # ── Poblar Sectores (solo de renta variable) ──
                             sectores_limpios = []
-                            for s in df_balanz['Sector_Macro'].dropna().unique():
+                            for s in df_rv['Sector_Macro'].dropna().unique():
                                 s = str(s).strip()
                                 if s and s not in ['0','None','nan']:
                                     sectores_limpios.append(s)
-                            for _, irow in df_balanz.iterrows():
+                            for _, irow in df_rv.iterrows():
                                 if str(irow['Sector_Macro']).strip() in ['0','None','nan','']:
                                     sd = str(irow['Sector_Detalle']).strip()
                                     if sd and sd not in ['0','None','nan',''] and sd not in sectores_limpios:

@@ -390,12 +390,35 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🚀 Cargar datos de mercado", type="primary", use_container_width=True):
-        tickers = st.session_state.portfolio['Ticker'].tolist()
-        if tickers:
-            with st.spinner("Descargando datos de Yahoo Finance..."):
-                st.session_state.hist_data = fetch_data(tickers, PERIOD)
-                st.session_state.tickers_loaded = tickers
-            st.success("✅ Datos cargados")
+        all_tickers = st.session_state.portfolio['Ticker'].tolist()
+        # Filtrar tickers que YF no puede resolver:
+        # - Bonos argentinos (GD, AL, AE, BP prefijos + números)
+        # - FCIs (BCMMUSDA y similares largos)
+        # - Bitcoin (BTC solo)
+        # - Efectivo/Cash
+        import re
+        def es_ticker_yf_valido(t):
+            t = str(t).strip()
+            if t in ('BTC', 'BCMMUSDA', 'Dolares Cash', 'Pesos Cash', 'Plazo fijo'):
+                return False
+            # Bonos argentinos: GD35, GD38, GD41, AE38, AL30, BPOA8, etc.
+            if re.match(r'^(GD|AL|AE|BP|TX|TV|DICP|CUAP)[0-9]', t):
+                return False
+            # Tickers muy largos sin punto (FCIs)
+            if len(t) > 6 and '.' not in t and not t.endswith('.BA'):
+                return False
+            return True
+
+        tickers_yf = [t for t in all_tickers if es_ticker_yf_valido(t)]
+        excluidos  = [t for t in all_tickers if not es_ticker_yf_valido(t)]
+
+        if tickers_yf:
+            with st.spinner(f"Descargando {len(tickers_yf)} tickers de Yahoo Finance..."):
+                st.session_state.hist_data = fetch_data(tickers_yf, PERIOD)
+                st.session_state.tickers_loaded = tickers_yf
+            st.success(f"✅ Datos cargados — {len(tickers_yf)} tickers")
+            if excluidos:
+                st.info(f"ℹ️ Excluidos del análisis histórico (no disponibles en YF): {', '.join(excluidos)}")
         else:
             st.warning("Primero cargá tu cartera")
 
@@ -1434,15 +1457,16 @@ with tabs[6]:
                     'Desvío %': round(row['Target_%'] - row['Peso_Actual_%'], 2),
                     '✓': '✅' if ok else '⚠️',
                 })
-            # Subtotal row
+            # Subtotal row — muestra: target sector / suma targets inst / peso real
+            peso_real_sec = df_sec_inst['Peso_Actual_%'].sum()
             master_rows.append({
                 'Sector': f'— Subtotal {sec}',
                 'Target Sector %': round(target_sec, 1),
-                'Ticker': '',
+                'Ticker': f'({len(df_sec_inst)} instrumentos)',
                 'Target Instrumento %': round(sum_inst, 2),
-                'Peso Real %': round(df_sec_inst['Peso_Actual_%'].sum(), 2),
-                'Desvío %': round(target_sec - df_sec_inst['Peso_Actual_%'].sum(), 2),
-                '✓': '✅' if ok else f'⚠️ faltan {target_sec-sum_inst:+.1f}%',
+                'Peso Real %': round(peso_real_sec, 2),
+                'Desvío %': round(target_sec - peso_real_sec, 2),
+                '✓': '✅' if ok else f'⚠️ targets suman {sum_inst:.1f}% ≠ {target_sec:.1f}%',
             })
 
         df_master = pd.DataFrame(master_rows)

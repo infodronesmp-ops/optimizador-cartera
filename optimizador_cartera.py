@@ -744,9 +744,63 @@ with tabs[1]:
                         if st.button("✅ Confirmar e importar cartera", type="primary"):
                             st.session_state.balanz_data        = df_balanz
                             st.session_state.balanz_usd_tickers = usd_reales
+
+                            # ── Poblar Mi Cartera automáticamente ──
+                            total_pesos = df_balanz['V_Actual_Pesos'].sum()
+                            portfolio_rows = []
+                            for _, irow in df_balanz.iterrows():
+                                ticker    = irow['Ticker']
+                                monto_usd = round(irow['V_Actual_Pesos'] / tc_input, 2)
+                                target_pct = round(irow['V_Actual_Pesos'] / total_pesos * 100, 2) if total_pesos > 0 else 0
+                                sector = str(irow['Sector_Macro']).strip()
+                                if not sector or sector in ['0','None','nan']:
+                                    sector = str(irow['Sector_Detalle']).strip()
+                                if not sector or sector in ['0','None','nan']:
+                                    sector = 'Otro'
+                                portfolio_rows.append({
+                                    'Ticker':    ticker,
+                                    'Monto_USD': monto_usd,
+                                    'Target_%':  target_pct,
+                                    'Sector':    sector,
+                                })
+                            st.session_state.portfolio = pd.DataFrame(portfolio_rows)
+
+                            # ── Poblar Catálogo de Instrumentos ──
+                            inst_rows = []
+                            for _, irow in df_balanz.iterrows():
+                                sector = str(irow['Sector_Macro']).strip()
+                                if not sector or sector in ['0','None','nan']:
+                                    sector = str(irow['Sector_Detalle']).strip()
+                                if not sector or sector in ['0','None','nan']:
+                                    sector = 'Otro'
+                                inst_rows.append({'Ticker': irow['Ticker'], 'Sector': sector})
+                            st.session_state.instruments = pd.DataFrame(inst_rows).drop_duplicates('Ticker')
+
+                            # ── Poblar Sectores ──
+                            sectores_limpios = []
+                            for s in df_balanz['Sector_Macro'].dropna().unique():
+                                s = str(s).strip()
+                                if s and s not in ['0','None','nan']:
+                                    sectores_limpios.append(s)
+                            for _, irow in df_balanz.iterrows():
+                                if str(irow['Sector_Macro']).strip() in ['0','None','nan','']:
+                                    sd = str(irow['Sector_Detalle']).strip()
+                                    if sd and sd not in ['0','None','nan',''] and sd not in sectores_limpios:
+                                        sectores_limpios.append(sd)
+                            if 'Otro' not in sectores_limpios:
+                                sectores_limpios.append('Otro')
+                            st.session_state.sectors = sectores_limpios
+
+                            save_persistent(
+                                st.session_state.portfolio,
+                                st.session_state.instruments,
+                                st.session_state.sectors,
+                                st.session_state.get('sector_targets', {})
+                            )
+
                             total = df_balanz['V_Actual_Pesos'].sum()
                             st.success(f"✅ Cartera importada — {len(df_balanz)} instrumentos — Total: ${total:,.0f}")
-                            st.info("👆 Ahora andá al **📊 Tablero Macro** para ver el análisis completo")
+                            st.info("👆 Andá al **📊 Tablero Macro** para el análisis, o a **⚖️ Rebalanceo** para ver los ajustes")
                             st.rerun()
 
         except Exception as e:

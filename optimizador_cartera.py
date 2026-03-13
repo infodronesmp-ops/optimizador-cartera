@@ -1400,7 +1400,11 @@ with tabs[6]:
                 changed_sectors[sec] = new_val
 
         if st.button("💾 Guardar targets de sector y redistribuir", type="primary"):
-            # Save sector targets
+            # Read values directly from widget keys (most reliable)
+            for sec in sectores_cartera:
+                key = f"sec_target_{sec}"
+                if key in st.session_state:
+                    changed_sectors[sec] = float(st.session_state[key])
             st.session_state.sector_targets = changed_sectors
 
             # Redistribute instrument targets proportionally within each sector
@@ -1543,7 +1547,10 @@ with tabs[7]:
         st.warning("⬅️ Hacé click en **Cargar datos de mercado** en el panel lateral")
     else:
         prices = st.session_state.hist_data
-        available = [t for t in st.session_state.portfolio['Ticker'].tolist() if t in prices.columns]
+        # Use tickers_loaded (YF format) intersected with prices columns
+        _port_tickers = st.session_state.portfolio['Ticker'].tolist()
+        _loaded = st.session_state.tickers_loaded if st.session_state.tickers_loaded else _port_tickers
+        available = [t for t in _loaded if t in prices.columns]
         if len(available) < 2:
             st.warning("Se necesitan al menos 2 tickers con datos disponibles")
         else:
@@ -1621,7 +1628,7 @@ with tabs[8]:
     else:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
-        available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
+        available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
         prices_clean = prices[available].ffill().bfill().dropna(how='all')
         # Drop tickers with fewer than 30 data points
         valid_tickers = [t for t in available if prices_clean[t].notna().sum() >= 30]
@@ -1722,7 +1729,7 @@ with tabs[9]:
     else:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
-        available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
+        available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
         prices_clean = prices[available].ffill().bfill().dropna(how='all')
 
         weights_actual = np.array([df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]/100
@@ -1814,7 +1821,7 @@ with tabs[10]:
     else:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
-        available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
+        available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
         prices_clean = prices[available].ffill().bfill().dropna(how='all')
         returns_all = prices_clean.pct_change().dropna()
 
@@ -1956,7 +1963,7 @@ with tabs[11]:
             st.markdown("#### Drawdown histórico real de tu cartera")
             prices = st.session_state.hist_data
             df_p = calc_portfolio_weights(st.session_state.portfolio.copy())
-            available = [t for t in df_p['Ticker'].tolist() if t in prices.columns]
+            available = [t for t in (st.session_state.tickers_loaded or df_p['Ticker'].tolist()) if t in prices.columns]
             if available:
                 w = np.array([df_p[df_p['Ticker']==t]['Peso_Actual_%'].values[0]/100
                     for t in available])
@@ -1997,7 +2004,7 @@ with tabs[12]:
     else:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
-        available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
+        available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
         if len(available) < 2:
             st.warning("Se necesitan al menos 2 activos con datos.")
         else:
@@ -2112,7 +2119,7 @@ with tabs[13]:
     else:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
-        available = [t for t in df_port['Ticker'].tolist() if t in prices.columns]
+        available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
         prices_clean = prices[available].ffill().bfill().dropna(how='all')
         returns = prices_clean.pct_change().dropna()
 

@@ -678,78 +678,72 @@ with tabs[1]:
                         ticker = str(row[col_map.get('Ticker', 0)] or '').strip()
                         if not ticker or ticker in ['#N/A','None','nan','']:
                             continue
-                        # Get V.Actual — handle text like "u$s 117,85"
+
+                        # V.Actual: detectar si viene como texto "u$s XXXX" (en dólares reales)
+                        # o como número (ya en pesos, Balanz lo convirtió)
                         v_actual_raw = row[col_map.get('V_Actual', 8)]
+                        v_actual_str = str(v_actual_raw).strip()
+                        es_usd_real  = 'u$s' in v_actual_str.lower() or 'u$' in v_actual_str.lower()
+
                         try:
-                            v_actual = float(str(v_actual_raw).replace('u$s','').replace('$','').replace(',','.').strip())
+                            v_actual_num = float(
+                                v_actual_str
+                                .replace('u$s','').replace('u$','').replace('$','')
+                                .replace('.','').replace(',','.')   # "44.598" → "44598" → float
+                                .strip()
+                            )
                         except:
                             continue
-                        if v_actual <= 0:
+                        if v_actual_num <= 0:
                             continue
 
+                        # Moneda del instrumento (naturaleza) directo del Excel
+                        moneda_excel = str(row[col_map.get('Moneda', 22)] or '').strip()
+
                         data_rows.append({
-                            'Ticker':        ticker,
-                            'Descripcion':   str(row[col_map.get('Descripcion',1)] or '').strip(),
-                            'V_Actual_Raw':  v_actual,
-                            'Moneda':        str(row[col_map.get('Moneda',22)] or '').strip(),
-                            'Sector_Macro':  str(row[col_map.get('Sector_Macro',25)] or '').strip(),
-                            'Sector_Detalle':str(row[col_map.get('Sector_Detalle',24)] or '').strip(),
-                            'Renta':         str(row[col_map.get('Renta',18)] or '').strip(),
-                            'Pais':          str(row[col_map.get('Pais',23)] or '').strip(),
+                            'Ticker':         ticker,
+                            'Descripcion':    str(row[col_map.get('Descripcion',1)] or '').strip(),
+                            'V_Actual_Num':   v_actual_num,   # número puro
+                            'Es_USD_Real':    es_usd_real,    # True = hay que multiplicar por TC
+                            'Moneda':         moneda_excel,   # Dolares / Pesos (naturaleza del instrumento)
+                            'Sector_Macro':   str(row[col_map.get('Sector_Macro',25)] or '').strip(),
+                            'Sector_Detalle': str(row[col_map.get('Sector_Detalle',24)] or '').strip(),
+                            'Renta':          str(row[col_map.get('Renta',18)] or '').strip(),
+                            'Pais':           str(row[col_map.get('Pais',23)] or '').strip(),
+                            'Instrumento':    str(row[16] or '').strip(),
                         })
 
                     if not data_rows:
                         st.error("No se encontraron datos válidos en la solapa")
                     else:
                         df_balanz = pd.DataFrame(data_rows)
-                        st.success(f"✅ {len(df_balanz)} instrumentos leídos correctamente")
+
+                        # Convertir a pesos: si Es_USD_Real → × tipo de cambio; si no → ya está en pesos
+                        df_balanz['V_Actual_Pesos'] = df_balanz.apply(
+                            lambda r: r['V_Actual_Num'] * tc_input if r['Es_USD_Real'] else r['V_Actual_Num'],
+                            axis=1
+                        )
+                        # Moneda_Display: la naturaleza del instrumento (columna Moneda del Excel)
+                        df_balanz['Moneda_Display'] = df_balanz['Moneda'].apply(
+                            lambda m: 'Dólares (USD)' if 'olar' in str(m) else 'Pesos (ARS)'
+                        )
+
+                        usd_reales = df_balanz[df_balanz['Es_USD_Real']]['Ticker'].tolist()
+                        total = df_balanz['V_Actual_Pesos'].sum()
+
+                        st.success(f"✅ {len(df_balanz)} instrumentos leídos — Total: **${total:,.0f}**")
+                        if usd_reales:
+                            st.info(f"💵 Instrumentos con V.Actual en dólares (se aplicó TC ${tc_input:,.0f}): **{', '.join(usd_reales)}**")
+
+                        # Preview table
+                        df_prev = df_balanz[['Ticker','Descripcion','Instrumento','Moneda','Es_USD_Real','V_Actual_Num','V_Actual_Pesos']].copy()
+                        df_prev.columns = ['Ticker','Descripción','Tipo','Moneda','V.Actual en USD?','V.Actual original','V.Actual en Pesos']
+                        st.dataframe(df_prev, use_container_width=True, hide_index=True)
 
                         st.markdown("---")
-                        st.markdown("### 💱 ¿Cuáles tienen el V. Actual en dólares?")
-                        st.markdown("Tildá los instrumentos cuyo valor en la planilla está en **dólares** (no en pesos). Normalmente son fondos en USD o acciones compradas en el exterior.")
-
-                        # Load previously saved USD tickers
-                        prev_usd = st.session_state.balanz_usd_tickers
-
-                        usd_selections = {}
-                        cols_check = st.columns(4)
-                        for i, ticker in enumerate(df_balanz['Ticker'].tolist()):
-                            desc = df_balanz[df_balanz['Ticker']==ticker]['Descripcion'].values[0][:25]
-                            val  = df_balanz[df_balanz['Ticker']==ticker]['V_Actual_Raw'].values[0]
-                            with cols_check[i % 4]:
-                                usd_selections[ticker] = st.checkbox(
-                                    f"{ticker} ({val:,.0f})",
-                                    value=(ticker in prev_usd),
-                                    key=f"usd_check_{ticker}",
-                                    help=desc
-                                )
-
-                        usd_tickers = [t for t, v in usd_selections.items() if v]
-
-                        st.markdown("---")
-
                         if st.button("✅ Confirmar e importar cartera", type="primary"):
-                            # Convert V.Actual to pesos
-                            df_balanz['V_Actual_Pesos'] = df_balanz.apply(
-                                lambda r: r['V_Actual_Raw'] * tc_input if r['Ticker'] in usd_tickers else r['V_Actual_Raw'],
-                                axis=1
-                            )
-                            # Add display column for moneda
-                            df_balanz['Moneda_Display'] = df_balanz['Ticker'].apply(
-                                lambda t: 'Dólares (USD)' if t in usd_tickers else 'Pesos (ARS)'
-                            )
-
-                            st.session_state.balanz_data       = df_balanz
-                            st.session_state.balanz_usd_tickers = usd_tickers
-
-                            # Save USD tickers to persistent storage
-                            save_persistent(
-                                st.session_state.portfolio,
-                                st.session_state.instruments,
-                                st.session_state.sectors,
-                                st.session_state.get('sector_targets', {})
-                            )
-
+                            st.session_state.balanz_data        = df_balanz
+                            st.session_state.balanz_usd_tickers = usd_reales
                             total = df_balanz['V_Actual_Pesos'].sum()
                             st.success(f"✅ Cartera importada — {len(df_balanz)} instrumentos — Total: ${total:,.0f}")
                             st.info("👆 Ahora andá al **📊 Tablero Macro** para ver el análisis completo")

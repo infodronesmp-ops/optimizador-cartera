@@ -123,6 +123,12 @@ if 'app_loaded' not in st.session_state:
     st.session_state.hist_data      = None
     st.session_state.tickers_loaded  = []
     st.session_state.app_loaded      = True
+if 'balanz_data' not in st.session_state:
+    st.session_state.balanz_data = None          # DataFrame importado de Balanz
+if 'balanz_usd_tickers' not in st.session_state:
+    st.session_state.balanz_usd_tickers = []     # Tickers con V.Actual en USD
+if 'balanz_tipo_cambio' not in st.session_state:
+    st.session_state.balanz_tipo_cambio = 1400.0 # Tipo de cambio default
 
 def sync_instrument(ticker, sector=""):
     """Agrega un ticker al catálogo si no existe, y guarda en disco."""
@@ -407,6 +413,8 @@ st.markdown("---")
 #  TABS
 # ─────────────────────────────────────────
 tabs = st.tabs([
+    "📊 Tablero Macro",
+    "📥 Importar Balanz",
     "📋 Instrumentos",
     "📁 Mi Cartera",
     "🏷️ Sectores",
@@ -424,9 +432,347 @@ tabs = st.tabs([
 
 
 # ══════════════════════════════════════════
-#  TAB 0 — INSTRUMENTOS (catálogo maestro)
+#  TAB 0 — TABLERO MACRO
 # ══════════════════════════════════════════
 with tabs[0]:
+    st.subheader("📊 Tablero Macro")
+
+    if st.session_state.balanz_data is None:
+        st.info("📥 Primero importá tu cartera desde la pestaña **📥 Importar Balanz**")
+    else:
+        df_b = st.session_state.balanz_data.copy()
+        total_pesos = df_b['V_Actual_Pesos'].sum()
+
+        if total_pesos == 0:
+            st.error("Sin datos válidos")
+        else:
+            # ── KPIs principales ──
+            st.markdown("### 💼 Cartera total")
+            tc = st.session_state.balanz_tipo_cambio
+            total_usd = total_pesos / tc
+            k1,k2,k3 = st.columns(3)
+            k1.metric("Total en Pesos", f"${total_pesos:,.0f}")
+            k2.metric("Total en USD (aprox)", f"u$s {total_usd:,.0f}")
+            k3.metric("Tipo de cambio usado", f"${tc:,.0f}")
+
+            st.markdown("---")
+
+            # ─────────────────────────────
+            # BLOQUE 1 — MONEDA
+            # ─────────────────────────────
+            st.markdown("### 💱 Por Moneda")
+            mon_group = df_b.groupby('Moneda_Display')['V_Actual_Pesos'].sum()
+            mon_pct   = (mon_group / total_pesos * 100).round(1)
+
+            col_m1, col_m2 = st.columns([1,1])
+            with col_m1:
+                fig_mon = go.Figure(go.Pie(
+                    labels=mon_group.index, values=mon_group.values,
+                    hole=0.45,
+                    marker_colors=['#00d4ff','#f87171'],
+                    textinfo='label+percent',
+                    textfont=dict(color='#e2e8f0', size=13)
+                ))
+                fig_mon.update_layout(
+                    paper_bgcolor='#111827', font_color='#e2e8f0',
+                    title_font_color='#00d4ff', title_font_size=14,
+                    title='Distribución por moneda',
+                    showlegend=False, height=300, margin=dict(t=40,b=10)
+                )
+                st.plotly_chart(fig_mon, use_container_width=True)
+
+            with col_m2:
+                for mon, pct in mon_pct.items():
+                    val = mon_group[mon]
+                    st.metric(f"{'💵' if 'USD' in mon or 'Dólar' in mon else '🇦🇷'} {mon}",
+                              f"{pct:.1f}%", f"${val:,.0f}")
+
+            st.markdown("---")
+
+            # ─────────────────────────────
+            # BLOQUE 2 — TIPO DE RENTA con desglose moneda
+            # ─────────────────────────────
+            st.markdown("### 📈 Por Tipo de Renta")
+
+            renta_types = ['Variable', 'Fija', 'Liquidez']
+            renta_colors = {'Variable':'#00d4ff', 'Fija':'#4ade80', 'Liquidez':'#fbbf24'}
+
+            # Normalize renta values
+            def norm_renta(r):
+                if r is None: return 'Otro'
+                r = str(r).strip()
+                if 'ariable' in r: return 'Variable'
+                if 'ija' in r or 'ija' in r: return 'Fija'
+                if 'iquidez' in r or 'iquid' in r or 'Plazo Fijo' in r: return 'Liquidez'
+                return 'Otro'
+
+            df_b['Renta_Norm'] = df_b['Renta'].apply(norm_renta)
+            renta_group = df_b.groupby('Renta_Norm')['V_Actual_Pesos'].sum()
+            renta_pct   = (renta_group / total_pesos * 100).round(1)
+
+            col_r1, col_r2 = st.columns([1.2, 1])
+            with col_r1:
+                fig_renta = go.Figure(go.Bar(
+                    x=list(renta_pct.index),
+                    y=list(renta_pct.values),
+                    marker_color=[renta_colors.get(r,'#94a3b8') for r in renta_pct.index],
+                    text=[f"{v:.1f}%" for v in renta_pct.values],
+                    textposition='outside', textfont=dict(color='#e2e8f0')
+                ))
+                fig_renta.update_layout(
+                    paper_bgcolor='#111827', plot_bgcolor='#111827',
+                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
+                    title='% sobre cartera total', yaxis_title='%',
+                    height=300, margin=dict(t=40,b=10), showlegend=False
+                )
+                st.plotly_chart(fig_renta, use_container_width=True)
+
+            with col_r2:
+                for renta in renta_group.index:
+                    val     = renta_group[renta]
+                    pct_tot = renta_pct[renta]
+                    df_r    = df_b[df_b['Renta_Norm']==renta]
+
+                    # Desglose por moneda dentro de este tipo de renta
+                    mon_dentro = df_r.groupby('Moneda_Display')['V_Actual_Pesos'].sum()
+                    total_r    = val
+
+                    st.markdown(f"**{renta_colors.get(renta,'⬜')} {renta} — {pct_tot:.1f}% del total**")
+                    for mon, mval in mon_dentro.items():
+                        pct_dentro = mval / total_r * 100 if total_r > 0 else 0
+                        pct_global = mval / total_pesos * 100
+                        icon = '💵' if 'USD' in mon or 'Dólar' in mon else '🇦🇷'
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;{icon} {mon}: **{pct_dentro:.1f}%** de {renta} ({pct_global:.1f}% del total)")
+                    st.markdown("---")
+
+            # ─────────────────────────────
+            # BLOQUE 3 — SECTOR MACRO (solo renta variable)
+            # ─────────────────────────────
+            st.markdown("### 🏭 Sectores MACRO (Renta Variable)")
+            df_rv = df_b[df_b['Renta_Norm']=='Variable'].copy()
+            if df_rv.empty:
+                st.info("Sin instrumentos de renta variable")
+            else:
+                total_rv = df_rv['V_Actual_Pesos'].sum()
+                sec_group = df_rv.groupby('Sector_Macro')['V_Actual_Pesos'].sum().sort_values(ascending=False)
+                sec_pct_rv    = (sec_group / total_rv * 100).round(1)
+                sec_pct_total = (sec_group / total_pesos * 100).round(1)
+
+                col_s1, col_s2 = st.columns([1.2,1])
+                with col_s1:
+                    fig_sec = go.Figure(go.Bar(
+                        y=list(sec_pct_rv.index),
+                        x=list(sec_pct_rv.values),
+                        orientation='h',
+                        marker_color='rgba(0,212,255,0.7)',
+                        text=[f"{v:.1f}%" for v in sec_pct_rv.values],
+                        textposition='outside', textfont=dict(color='#e2e8f0')
+                    ))
+                    fig_sec.update_layout(
+                        paper_bgcolor='#111827', plot_bgcolor='#111827',
+                        font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
+                        title='% sobre Renta Variable', height=350,
+                        margin=dict(t=40,b=10), showlegend=False
+                    )
+                    st.plotly_chart(fig_sec, use_container_width=True)
+
+                with col_s2:
+                    for sec in sec_group.index:
+                        pct_rv  = sec_pct_rv[sec]
+                        pct_tot = sec_pct_total[sec]
+                        st.markdown(f"**{sec}**: {pct_rv:.1f}% de RV ({pct_tot:.1f}% del total)")
+
+            st.markdown("---")
+
+            # ─────────────────────────────
+            # BLOQUE 4 — TABLA DETALLE
+            # ─────────────────────────────
+            st.markdown("### 📋 Detalle por instrumento")
+            df_show = df_b[['Ticker','Descripcion','Renta_Norm','Sector_Macro','Sector_Detalle',
+                            'Moneda_Display','V_Actual_Pesos']].copy()
+            df_show['% Cartera'] = (df_show['V_Actual_Pesos'] / total_pesos * 100).round(2)
+            df_show = df_show.sort_values('V_Actual_Pesos', ascending=False)
+            df_show.columns = ['Ticker','Descripción','Renta','Sector MACRO','Sector Detalle',
+                               'Moneda','V. Actual ($)','% Cartera']
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+
+# ══════════════════════════════════════════
+#  TAB 1 — IMPORTAR BALANZ
+# ══════════════════════════════════════════
+with tabs[1]:
+    st.subheader("📥 Importar desde Balanz")
+    st.markdown("Copiá y pegá la info desde Balanz a tu Excel y subilo acá. La app lee la solapa **'Actualizar de Balanz'** automáticamente.")
+
+    col_up, col_tc = st.columns([2,1])
+    with col_up:
+        uploaded_balanz = st.file_uploader(
+            "Subí tu archivo Excel de Balanz (.xlsm o .xlsx)",
+            type=['xlsm','xlsx','xls'],
+            key="balanz_uploader"
+        )
+    with col_tc:
+        tc_input = st.number_input(
+            "Tipo de cambio ($ por u$s)",
+            min_value=1.0, value=float(st.session_state.balanz_tipo_cambio),
+            step=10.0, help="Se usa para convertir a pesos los instrumentos marcados como 'en dólares'"
+        )
+        st.session_state.balanz_tipo_cambio = tc_input
+
+    if uploaded_balanz:
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(uploaded_balanz, read_only=True, keep_vba=True, data_only=True)
+
+            # Find the Balanz sheet
+            sheet_name = None
+            for name in wb.sheetnames:
+                if 'balanz' in name.lower() or 'actualiz' in name.lower():
+                    sheet_name = name
+                    break
+            if not sheet_name:
+                st.error("No se encontró la solapa 'Actualizar de Balanz' en el archivo")
+            else:
+                ws = wb[sheet_name]
+                rows = list(ws.iter_rows(values_only=True))
+
+                # Find header row
+                header_row = None
+                for i, row in enumerate(rows[:10]):
+                    if row and 'Ticker' in str(row):
+                        header_row = i
+                        break
+
+                if header_row is None:
+                    st.error("No se encontró el encabezado con 'Ticker' en la solapa")
+                else:
+                    headers = [str(h).strip() if h else '' for h in rows[header_row]]
+
+                    # Map columns
+                    col_map = {}
+                    for i, h in enumerate(headers):
+                        hl = h.lower()
+                        if 'ticker' in hl: col_map['Ticker'] = i
+                        elif 'v. actual' in hl or 'v.actual' in hl or 'actual' in hl and 'valor' not in hl: col_map['V_Actual'] = i
+                        elif 'descripci' in hl: col_map['Descripcion'] = i
+                        elif 'moneda' in hl: col_map['Moneda'] = i
+                        elif 'sector macro' in hl or 'sector_macro' in hl or ('sector' in hl and 'macro' in hl): col_map['Sector_Macro'] = i
+                        elif 'sector' in hl and 'macro' not in hl: col_map['Sector_Detalle'] = i
+                        elif 'renta' in hl and 'rendimiento' not in hl: col_map['Renta'] = i
+                        elif 'pa' in hl and 'is' in hl: col_map['Pais'] = i
+
+                    # Also check for "V. Actual" specifically (col index 8 based on our reading)
+                    if 'V_Actual' not in col_map:
+                        for i, h in enumerate(headers):
+                            if 'actual' in h.lower():
+                                col_map['V_Actual'] = i
+                                break
+
+                    st.info(f"📋 Solapa encontrada: **{sheet_name}** | Columnas mapeadas: {list(col_map.keys())}")
+
+                    # Parse data rows
+                    data_rows = []
+                    for row in rows[header_row+1:]:
+                        if not row or not any(v is not None for v in row):
+                            continue
+                        ticker = str(row[col_map.get('Ticker', 0)] or '').strip()
+                        if not ticker or ticker in ['#N/A','None','nan','']:
+                            continue
+                        # Get V.Actual — handle text like "u$s 117,85"
+                        v_actual_raw = row[col_map.get('V_Actual', 8)]
+                        try:
+                            v_actual = float(str(v_actual_raw).replace('u$s','').replace('$','').replace(',','.').strip())
+                        except:
+                            continue
+                        if v_actual <= 0:
+                            continue
+
+                        data_rows.append({
+                            'Ticker':        ticker,
+                            'Descripcion':   str(row[col_map.get('Descripcion',1)] or '').strip(),
+                            'V_Actual_Raw':  v_actual,
+                            'Moneda':        str(row[col_map.get('Moneda',22)] or '').strip(),
+                            'Sector_Macro':  str(row[col_map.get('Sector_Macro',25)] or '').strip(),
+                            'Sector_Detalle':str(row[col_map.get('Sector_Detalle',24)] or '').strip(),
+                            'Renta':         str(row[col_map.get('Renta',18)] or '').strip(),
+                            'Pais':          str(row[col_map.get('Pais',23)] or '').strip(),
+                        })
+
+                    if not data_rows:
+                        st.error("No se encontraron datos válidos en la solapa")
+                    else:
+                        df_balanz = pd.DataFrame(data_rows)
+                        st.success(f"✅ {len(df_balanz)} instrumentos leídos correctamente")
+
+                        st.markdown("---")
+                        st.markdown("### 💱 ¿Cuáles tienen el V. Actual en dólares?")
+                        st.markdown("Tildá los instrumentos cuyo valor en la planilla está en **dólares** (no en pesos). Normalmente son fondos en USD o acciones compradas en el exterior.")
+
+                        # Load previously saved USD tickers
+                        prev_usd = st.session_state.balanz_usd_tickers
+
+                        usd_selections = {}
+                        cols_check = st.columns(4)
+                        for i, ticker in enumerate(df_balanz['Ticker'].tolist()):
+                            desc = df_balanz[df_balanz['Ticker']==ticker]['Descripcion'].values[0][:25]
+                            val  = df_balanz[df_balanz['Ticker']==ticker]['V_Actual_Raw'].values[0]
+                            with cols_check[i % 4]:
+                                usd_selections[ticker] = st.checkbox(
+                                    f"{ticker} ({val:,.0f})",
+                                    value=(ticker in prev_usd),
+                                    key=f"usd_check_{ticker}",
+                                    help=desc
+                                )
+
+                        usd_tickers = [t for t, v in usd_selections.items() if v]
+
+                        st.markdown("---")
+
+                        if st.button("✅ Confirmar e importar cartera", type="primary"):
+                            # Convert V.Actual to pesos
+                            df_balanz['V_Actual_Pesos'] = df_balanz.apply(
+                                lambda r: r['V_Actual_Raw'] * tc_input if r['Ticker'] in usd_tickers else r['V_Actual_Raw'],
+                                axis=1
+                            )
+                            # Add display column for moneda
+                            df_balanz['Moneda_Display'] = df_balanz['Ticker'].apply(
+                                lambda t: 'Dólares (USD)' if t in usd_tickers else 'Pesos (ARS)'
+                            )
+
+                            st.session_state.balanz_data       = df_balanz
+                            st.session_state.balanz_usd_tickers = usd_tickers
+
+                            # Save USD tickers to persistent storage
+                            save_persistent(
+                                st.session_state.portfolio,
+                                st.session_state.instruments,
+                                st.session_state.sectors,
+                                st.session_state.get('sector_targets', {})
+                            )
+
+                            total = df_balanz['V_Actual_Pesos'].sum()
+                            st.success(f"✅ Cartera importada — {len(df_balanz)} instrumentos — Total: ${total:,.0f}")
+                            st.info("👆 Ahora andá al **📊 Tablero Macro** para ver el análisis completo")
+                            st.rerun()
+
+        except Exception as e:
+            st.error(f"Error al leer el archivo: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+    elif st.session_state.balanz_data is not None:
+        df_b = st.session_state.balanz_data
+        st.success(f"✅ Cartera importada — {len(df_b)} instrumentos — Total: ${df_b['V_Actual_Pesos'].sum():,.0f}")
+        st.markdown(f"**Instrumentos con V.Actual en USD:** {', '.join(st.session_state.balanz_usd_tickers) or 'ninguno'}")
+        if st.button("🗑️ Limpiar datos importados"):
+            st.session_state.balanz_data = None
+            st.rerun()
+
+
+# ══════════════════════════════════════════
+#  TAB 0 — INSTRUMENTOS (catálogo maestro)
+# ══════════════════════════════════════════
+with tabs[2]:
     st.subheader("📋 Catálogo de Instrumentos")
     st.markdown("Acá cargás tus instrumentos **una sola vez**. Quedan guardados y disponibles para armar tu cartera.")
 
@@ -501,7 +847,7 @@ with tabs[0]:
 # ══════════════════════════════════════════
 #  TAB 1 — MI CARTERA
 # ══════════════════════════════════════════
-with tabs[1]:
+with tabs[3]:
     st.subheader("📁 Mi Cartera")
 
     # ── Agregar desde catálogo ──
@@ -680,7 +1026,7 @@ with tabs[1]:
 # ══════════════════════════════════════════
 #  TAB 2 — SECTORES
 # ══════════════════════════════════════════
-with tabs[2]:
+with tabs[4]:
     st.subheader("🏷️ Análisis por Sector")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -830,7 +1176,7 @@ with tabs[2]:
 # ══════════════════════════════════════════
 #  TAB 3 — REBALANCEO
 # ══════════════════════════════════════════
-with tabs[3]:
+with tabs[5]:
     st.subheader("⚖️ Rebalanceo")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -896,7 +1242,7 @@ with tabs[3]:
 # ══════════════════════════════════════════
 #  TAB 4 — ESTRATEGIA
 # ══════════════════════════════════════════
-with tabs[4]:
+with tabs[6]:
     st.subheader("🎯 Estrategia de Cartera")
     st.markdown("Definí tu **política de inversión**: cuánto % querés en cada sector, y cómo distribuirlo entre los instrumentos.")
 
@@ -1108,7 +1454,7 @@ with tabs[4]:
 # ══════════════════════════════════════════
 #  TAB 4 — CORRELACIÓN
 # ══════════════════════════════════════════
-with tabs[5]:
+with tabs[7]:
     st.subheader("🔗 Correlación (datos reales)")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1185,7 +1531,7 @@ with tabs[5]:
 - ⚠️ Correlación **>0.80** es una alerta: esos activos se comportan casi igual y no agregan diversificación real.
 - El gráfico de correlación móvil muestra si la relación entre dos activos cambia con el tiempo — lo ideal es que sea estable y baja.
             """)
-with tabs[6]:
+with tabs[8]:
     st.subheader("📐 Métricas reales")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1286,7 +1632,7 @@ with tabs[6]:
 # ══════════════════════════════════════════
 #  TAB 6 — RENDIMIENTO
 # ══════════════════════════════════════════
-with tabs[7]:
+with tabs[9]:
     st.subheader("📈 Rendimiento acumulado")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1378,7 +1724,7 @@ with tabs[7]:
 # ══════════════════════════════════════════
 #  TAB 7 — VaR
 # ══════════════════════════════════════════
-with tabs[8]:
+with tabs[10]:
     st.subheader("⚠️ Value at Risk (VaR) — 95% de confianza")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1454,7 +1800,7 @@ with tabs[8]:
 # ══════════════════════════════════════════
 #  TAB 6 — STRESS TEST
 # ══════════════════════════════════════════
-with tabs[9]:
+with tabs[11]:
     st.subheader("🔥 Stress Test")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1561,7 +1907,7 @@ with tabs[9]:
 # ══════════════════════════════════════════
 #  TAB 9 — FRONTERA EFICIENTE
 # ══════════════════════════════════════════
-with tabs[10]:
+with tabs[12]:
     st.subheader("🌐 Frontera Eficiente de Markowitz")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1676,7 +2022,7 @@ with tabs[10]:
 # ══════════════════════════════════════════
 #  TAB 7 — BLACK-LITTERMAN
 # ══════════════════════════════════════════
-with tabs[11]:
+with tabs[13]:
     st.subheader("🧠 Black-Litterman")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1806,7 +2152,7 @@ with tabs[11]:
 # ══════════════════════════════════════════
 #  TAB 8 — MONTE CARLO
 # ══════════════════════════════════════════
-with tabs[12]:
+with tabs[14]:
     st.subheader("🎲 Monte Carlo")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")

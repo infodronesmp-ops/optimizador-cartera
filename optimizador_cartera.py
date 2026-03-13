@@ -7,7 +7,40 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from scipy.optimize import minimize
 import warnings
+import json
+import os
 warnings.filterwarnings('ignore')
+
+# ─────────────────────────────────────────
+#  PERSISTENCIA EN DISCO
+# ─────────────────────────────────────────
+DATA_FILE = "cartera_data.json"
+
+def load_persistent():
+    """Carga datos guardados en disco. Si no existe el archivo, devuelve defaults."""
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, 'r') as f:
+                data = json.load(f)
+            return data
+        except:
+            pass
+    return None
+
+def save_persistent(portfolio_df, instruments_df, sectors_list):
+    """Guarda cartera, instrumentos y sectores en disco."""
+    try:
+        data = {
+            'portfolio': portfolio_df.to_dict(orient='records'),
+            'instruments': instruments_df.to_dict(orient='records'),
+            'sectors': sectors_list,
+        }
+        with open(DATA_FILE, 'w') as f:
+            json.dump(data, f, ensure_ascii=False)
+        return True
+    except Exception as e:
+        st.error(f"Error al guardar: {e}")
+        return False
 
 # ─────────────────────────────────────────
 #  CONFIG
@@ -73,25 +106,29 @@ DEFAULT_SECTORS = [
     'Minería/Cobre','Defensa','Otro'
 ]
 
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = DEFAULT_PORTFOLIO.copy()
-if 'sectors' not in st.session_state:
-    st.session_state.sectors = DEFAULT_SECTORS.copy()
-if 'hist_data' not in st.session_state:
-    st.session_state.hist_data = None
-if 'tickers_loaded' not in st.session_state:
+# ── Inicializar session state cargando desde disco ──
+if 'app_loaded' not in st.session_state:
+    saved = load_persistent()
+    if saved:
+        st.session_state.portfolio    = pd.DataFrame(saved.get('portfolio', DEFAULT_PORTFOLIO.to_dict('records')))
+        st.session_state.instruments  = pd.DataFrame(saved.get('instruments', DEFAULT_PORTFOLIO[['Ticker','Sector']].to_dict('records')))
+        st.session_state.sectors      = saved.get('sectors', DEFAULT_SECTORS.copy())
+    else:
+        st.session_state.portfolio    = DEFAULT_PORTFOLIO.copy()
+        st.session_state.instruments  = DEFAULT_PORTFOLIO[['Ticker','Sector']].copy().reset_index(drop=True)
+        st.session_state.sectors      = DEFAULT_SECTORS.copy()
+    st.session_state.hist_data     = None
     st.session_state.tickers_loaded = []
-# Catálogo maestro de instrumentos — persiste independiente de la cartera
-if 'instruments' not in st.session_state:
-    st.session_state.instruments = DEFAULT_PORTFOLIO[['Ticker','Sector']].copy().reset_index(drop=True)
+    st.session_state.app_loaded    = True
 
 def sync_instrument(ticker, sector=""):
-    """Agrega un ticker al catálogo si no existe."""
+    """Agrega un ticker al catálogo si no existe, y guarda en disco."""
     if ticker and ticker not in st.session_state.instruments['Ticker'].values:
         new_row = pd.DataFrame([{'Ticker': ticker, 'Sector': sector}])
         st.session_state.instruments = pd.concat(
             [st.session_state.instruments, new_row], ignore_index=True
         )
+        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
 
 # ─────────────────────────────────────────
 #  HELPERS
@@ -331,6 +368,7 @@ with st.sidebar:
     if st.button("➕ Agregar sector") and new_sector.strip():
         if new_sector.strip() not in st.session_state.sectors:
             st.session_state.sectors.append(new_sector.strip())
+            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
             st.success(f"Sector '{new_sector}' agregado")
         else:
             st.warning("Ya existe ese sector")
@@ -338,6 +376,7 @@ with st.sidebar:
     sector_to_del = st.selectbox("Eliminar sector", ["—"] + st.session_state.sectors)
     if st.button("🗑️ Eliminar sector") and sector_to_del != "—":
         st.session_state.sectors.remove(sector_to_del)
+        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
         st.success(f"Sector '{sector_to_del}' eliminado")
 
     st.markdown("---")
@@ -415,6 +454,7 @@ with tabs[0]:
                 st.session_state.instruments = pd.concat(
                     [st.session_state.instruments, new_inst], ignore_index=True
                 )
+                save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
                 st.success(f"✅ **{inst_ticker}** agregado al catálogo")
                 st.rerun()
 
@@ -442,11 +482,13 @@ with tabs[0]:
             inst_edited_clean['Ticker'] = inst_edited_clean['Ticker'].astype(str).str.upper().str.strip()
             inst_edited_clean = inst_edited_clean[inst_edited_clean['Ticker'].str.match(r'^[A-Z0-9.\-]{1,10}$', na=False)]
             st.session_state.instruments = inst_edited_clean.reset_index(drop=True)
+            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
             st.success("✅ Catálogo actualizado")
             st.rerun()
     with col_restore:
         if st.button("🔄 Restaurar catálogo original"):
             st.session_state.instruments = DEFAULT_PORTFOLIO[['Ticker','Sector']].copy().reset_index(drop=True)
+            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
             st.success("✅ Catálogo restaurado")
             st.rerun()
 
@@ -486,6 +528,7 @@ with tabs[1]:
                 st.session_state.portfolio = pd.concat(
                     [st.session_state.portfolio, new_row], ignore_index=True
                 )
+                save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
                 st.success(f"✅ {sel_ticker} agregado a tu cartera")
                 st.rerun()
         else:
@@ -527,6 +570,7 @@ with tabs[1]:
                     )
                     # Sync to instruments catalog
                     sync_instrument(new_ticker, new_sector)
+                    save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
                     st.success(f"✅ {new_ticker} agregado a tu cartera y al catálogo")
                     st.rerun()
 
@@ -534,6 +578,7 @@ with tabs[1]:
 
     if st.button("🔄 Restaurar cartera de ejemplo"):
         st.session_state.portfolio = DEFAULT_PORTFOLIO.copy()
+        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
         st.rerun()
 
     if not st.session_state.portfolio.empty:
@@ -611,6 +656,7 @@ with tabs[1]:
                 for _, row in edited_clean.iterrows():
                     sync_instrument(row['Ticker'], row.get('Sector',''))
                 st.session_state.portfolio = edited_clean
+                save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
                 st.success("✅ Cambios guardados — nuevos tickers sincronizados al catálogo")
                 st.rerun()
 

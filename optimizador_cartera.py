@@ -27,13 +27,14 @@ def load_persistent():
             pass
     return None
 
-def save_persistent(portfolio_df, instruments_df, sectors_list):
-    """Guarda cartera, instrumentos y sectores en disco."""
+def save_persistent(portfolio_df, instruments_df, sectors_list, sector_targets_dict=None):
+    """Guarda cartera, instrumentos, sectores y targets de sector en disco."""
     try:
         data = {
             'portfolio': portfolio_df.to_dict(orient='records'),
             'instruments': instruments_df.to_dict(orient='records'),
             'sectors': sectors_list,
+            'sector_targets': sector_targets_dict or {},
         }
         with open(DATA_FILE, 'w') as f:
             json.dump(data, f, ensure_ascii=False)
@@ -110,16 +111,18 @@ DEFAULT_SECTORS = [
 if 'app_loaded' not in st.session_state:
     saved = load_persistent()
     if saved:
-        st.session_state.portfolio    = pd.DataFrame(saved.get('portfolio', DEFAULT_PORTFOLIO.to_dict('records')))
-        st.session_state.instruments  = pd.DataFrame(saved.get('instruments', DEFAULT_PORTFOLIO[['Ticker','Sector']].to_dict('records')))
-        st.session_state.sectors      = saved.get('sectors', DEFAULT_SECTORS.copy())
+        st.session_state.portfolio       = pd.DataFrame(saved.get('portfolio', DEFAULT_PORTFOLIO.to_dict('records')))
+        st.session_state.instruments     = pd.DataFrame(saved.get('instruments', DEFAULT_PORTFOLIO[['Ticker','Sector']].to_dict('records')))
+        st.session_state.sectors         = saved.get('sectors', DEFAULT_SECTORS.copy())
+        st.session_state.sector_targets  = saved.get('sector_targets', {})
     else:
-        st.session_state.portfolio    = DEFAULT_PORTFOLIO.copy()
-        st.session_state.instruments  = DEFAULT_PORTFOLIO[['Ticker','Sector']].copy().reset_index(drop=True)
-        st.session_state.sectors      = DEFAULT_SECTORS.copy()
-    st.session_state.hist_data     = None
-    st.session_state.tickers_loaded = []
-    st.session_state.app_loaded    = True
+        st.session_state.portfolio       = DEFAULT_PORTFOLIO.copy()
+        st.session_state.instruments     = DEFAULT_PORTFOLIO[['Ticker','Sector']].copy().reset_index(drop=True)
+        st.session_state.sectors         = DEFAULT_SECTORS.copy()
+        st.session_state.sector_targets  = {}
+    st.session_state.hist_data      = None
+    st.session_state.tickers_loaded  = []
+    st.session_state.app_loaded      = True
 
 def sync_instrument(ticker, sector=""):
     """Agrega un ticker al catálogo si no existe, y guarda en disco."""
@@ -128,7 +131,7 @@ def sync_instrument(ticker, sector=""):
         st.session_state.instruments = pd.concat(
             [st.session_state.instruments, new_row], ignore_index=True
         )
-        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
+        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
 
 # ─────────────────────────────────────────
 #  HELPERS
@@ -368,7 +371,7 @@ with st.sidebar:
     if st.button("➕ Agregar sector") and new_sector.strip():
         if new_sector.strip() not in st.session_state.sectors:
             st.session_state.sectors.append(new_sector.strip())
-            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
+            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
             st.success(f"Sector '{new_sector}' agregado")
         else:
             st.warning("Ya existe ese sector")
@@ -376,7 +379,7 @@ with st.sidebar:
     sector_to_del = st.selectbox("Eliminar sector", ["—"] + st.session_state.sectors)
     if st.button("🗑️ Eliminar sector") and sector_to_del != "—":
         st.session_state.sectors.remove(sector_to_del)
-        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
+        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
         st.success(f"Sector '{sector_to_del}' eliminado")
 
     st.markdown("---")
@@ -408,6 +411,7 @@ tabs = st.tabs([
     "📁 Mi Cartera",
     "🏷️ Sectores",
     "⚖️ Rebalanceo",
+    "🎯 Estrategia",
     "🔗 Correlación",
     "📐 Métricas",
     "📈 Rendimiento",
@@ -454,7 +458,7 @@ with tabs[0]:
                 st.session_state.instruments = pd.concat(
                     [st.session_state.instruments, new_inst], ignore_index=True
                 )
-                save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
+                save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
                 st.success(f"✅ **{inst_ticker}** agregado al catálogo")
                 st.rerun()
 
@@ -482,13 +486,13 @@ with tabs[0]:
             inst_edited_clean['Ticker'] = inst_edited_clean['Ticker'].astype(str).str.upper().str.strip()
             inst_edited_clean = inst_edited_clean[inst_edited_clean['Ticker'].str.match(r'^[A-Z0-9.\-]{1,10}$', na=False)]
             st.session_state.instruments = inst_edited_clean.reset_index(drop=True)
-            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
+            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
             st.success("✅ Catálogo actualizado")
             st.rerun()
     with col_restore:
         if st.button("🔄 Restaurar catálogo original"):
             st.session_state.instruments = DEFAULT_PORTFOLIO[['Ticker','Sector']].copy().reset_index(drop=True)
-            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
+            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
             st.success("✅ Catálogo restaurado")
             st.rerun()
 
@@ -528,7 +532,7 @@ with tabs[1]:
                 st.session_state.portfolio = pd.concat(
                     [st.session_state.portfolio, new_row], ignore_index=True
                 )
-                save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
+                save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
                 st.success(f"✅ {sel_ticker} agregado a tu cartera")
                 st.rerun()
         else:
@@ -570,7 +574,7 @@ with tabs[1]:
                     )
                     # Sync to instruments catalog
                     sync_instrument(new_ticker, new_sector)
-                    save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
+                    save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
                     st.success(f"✅ {new_ticker} agregado a tu cartera y al catálogo")
                     st.rerun()
 
@@ -578,7 +582,7 @@ with tabs[1]:
 
     if st.button("🔄 Restaurar cartera de ejemplo"):
         st.session_state.portfolio = DEFAULT_PORTFOLIO.copy()
-        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
+        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
         st.rerun()
 
     if not st.session_state.portfolio.empty:
@@ -656,7 +660,7 @@ with tabs[1]:
                 for _, row in edited_clean.iterrows():
                     sync_instrument(row['Ticker'], row.get('Sector',''))
                 st.session_state.portfolio = edited_clean
-                save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors)
+                save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
                 st.success("✅ Cambios guardados — nuevos tickers sincronizados al catálogo")
                 st.rerun()
 
@@ -890,9 +894,221 @@ with tabs[3]:
 
 
 # ══════════════════════════════════════════
-#  TAB 4 — CORRELACIÓN
+#  TAB 4 — ESTRATEGIA
 # ══════════════════════════════════════════
 with tabs[4]:
+    st.subheader("🎯 Estrategia de Cartera")
+    st.markdown("Definí tu **política de inversión**: cuánto % querés en cada sector, y cómo distribuirlo entre los instrumentos.")
+
+    if st.session_state.portfolio.empty:
+        st.info("Cargá tu cartera primero en la pestaña 📁 Mi Cartera")
+    else:
+        df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
+        total   = df_port['Total'].iloc[0]
+
+        # ── Inicializar sector_targets si no existe ──
+        if 'sector_targets' not in st.session_state:
+            st.session_state.sector_targets = {}
+
+        # Sectores presentes en la cartera
+        sectores_cartera = sorted(df_port['Sector'].fillna('Sin sector').unique().tolist())
+
+        # Inicializar targets faltantes desde suma de instrumentos actuales
+        for sec in sectores_cartera:
+            if sec not in st.session_state.sector_targets:
+                pesos_sec = df_port[df_port['Sector']==sec]['Target_%'].sum()
+                st.session_state.sector_targets[sec] = round(float(pesos_sec), 1)
+
+        # ─────────────────────────────────────────
+        # PASO 1 — Targets por sector
+        # ─────────────────────────────────────────
+        st.markdown("### 1️⃣ Target por sector")
+        st.markdown("Editá el **% objetivo** de cada sector. Al cambiar un sector, los instrumentos se redistribuyen proporcionalmente.")
+
+        total_sector_target = sum(st.session_state.sector_targets.get(s, 0) for s in sectores_cartera)
+        if abs(total_sector_target - 100) > 0.1:
+            st.warning(f"⚠️ Los targets de sector suman **{total_sector_target:.1f}%** — deben sumar 100%")
+        else:
+            st.success(f"✅ Targets de sector suman 100%")
+
+        # Sector target editor — una fila por sector
+        sec_rows = []
+        for sec in sectores_cartera:
+            tickers_sec = df_port[df_port['Sector']==sec]['Ticker'].tolist()
+            peso_real   = df_port[df_port['Sector']==sec]['Peso_Actual_%'].sum()
+            target_sec  = st.session_state.sector_targets.get(sec, 0.0)
+            sec_rows.append({
+                'Sector': sec,
+                'Target Sector %': round(target_sec, 1),
+                'Peso Real %': round(peso_real, 2),
+                'Diferencia %': round(target_sec - peso_real, 2),
+                'Instrumentos': ', '.join(tickers_sec),
+            })
+
+        df_sec = pd.DataFrame(sec_rows)
+
+        def color_diff(val):
+            try:
+                v = float(val)
+                if v > 1:  return 'background-color: rgba(74,222,128,0.2); color: #4ade80'
+                if v < -1: return 'background-color: rgba(248,113,113,0.2); color: #f87171'
+                return 'background-color: rgba(251,191,36,0.15); color: #fbbf24'
+            except: return ''
+
+        st.dataframe(
+            df_sec.style.map(color_diff, subset=['Diferencia %']),
+            use_container_width=True, hide_index=True
+        )
+
+        # Sector sliders
+        st.markdown("#### Ajustá los targets de sector")
+        cols_sec = st.columns(min(4, len(sectores_cartera)))
+        changed_sectors = {}
+        for i, sec in enumerate(sectores_cartera):
+            with cols_sec[i % len(cols_sec)]:
+                new_val = st.number_input(
+                    f"{sec}", min_value=0.0, max_value=100.0, step=0.5,
+                    value=float(st.session_state.sector_targets.get(sec, 0.0)),
+                    key=f"sec_target_{sec}"
+                )
+                changed_sectors[sec] = new_val
+
+        if st.button("💾 Guardar targets de sector y redistribuir", type="primary"):
+            # Save sector targets
+            st.session_state.sector_targets = changed_sectors
+
+            # Redistribute instrument targets proportionally within each sector
+            new_portfolio = st.session_state.portfolio.copy()
+            for sec, new_target_sec in changed_sectors.items():
+                mask = new_portfolio['Sector'] == sec
+                tickers_in_sec = new_portfolio[mask]['Ticker'].tolist()
+                if not tickers_in_sec:
+                    continue
+                # Current instrument targets within sector
+                old_targets = new_portfolio[mask]['Target_%'].values.astype(float)
+                old_sum = old_targets.sum()
+                if old_sum > 0:
+                    # Proportional redistribution
+                    new_targets = old_targets / old_sum * new_target_sec
+                else:
+                    # Equal distribution if no existing targets
+                    new_targets = np.full(len(old_targets), new_target_sec / len(old_targets))
+                new_portfolio.loc[mask, 'Target_%'] = np.round(new_targets, 2)
+
+            st.session_state.portfolio = new_portfolio
+            save_persistent(
+                st.session_state.portfolio,
+                st.session_state.instruments,
+                st.session_state.sectors,
+                st.session_state.sector_targets
+            )
+            st.success("✅ Targets guardados y redistribuidos proporcionalmente")
+            st.rerun()
+
+        st.markdown("---")
+
+        # ─────────────────────────────────────────
+        # PASO 2 — Tabla maestra sector + instrumento
+        # ─────────────────────────────────────────
+        st.markdown("### 2️⃣ Tabla maestra — Sector → Instrumento")
+        st.markdown("Podés ajustar el **target de cada instrumento** directamente. La app te avisa si la suma del sector no coincide con el target del sector.")
+
+        # Build master table
+        master_rows = []
+        for sec in sectores_cartera:
+            df_sec_inst = df_port[df_port['Sector']==sec].copy()
+            target_sec  = st.session_state.sector_targets.get(sec, 0.0)
+            sum_inst    = df_sec_inst['Target_%'].sum()
+            ok          = abs(sum_inst - target_sec) < 0.2
+
+            for _, row in df_sec_inst.iterrows():
+                master_rows.append({
+                    'Sector': sec,
+                    'Target Sector %': round(target_sec, 1),
+                    'Ticker': row['Ticker'],
+                    'Target Instrumento %': round(row['Target_%'], 2),
+                    'Peso Real %': round(row['Peso_Actual_%'], 2),
+                    'Desvío %': round(row['Target_%'] - row['Peso_Actual_%'], 2),
+                    '✓': '✅' if ok else '⚠️',
+                })
+            # Subtotal row
+            master_rows.append({
+                'Sector': f'— Subtotal {sec}',
+                'Target Sector %': round(target_sec, 1),
+                'Ticker': '',
+                'Target Instrumento %': round(sum_inst, 2),
+                'Peso Real %': round(df_sec_inst['Peso_Actual_%'].sum(), 2),
+                'Desvío %': round(target_sec - df_sec_inst['Peso_Actual_%'].sum(), 2),
+                '✓': '✅' if ok else f'⚠️ faltan {target_sec-sum_inst:+.1f}%',
+            })
+
+        df_master = pd.DataFrame(master_rows)
+
+        # Editable — only Target Instrumento % is editable
+        edited_master = st.data_editor(
+            df_master,
+            column_config={
+                'Sector':                  st.column_config.TextColumn('Sector', disabled=True),
+                'Target Sector %':         st.column_config.NumberColumn('Target Sector %', format="%.1f%%", disabled=True),
+                'Ticker':                  st.column_config.TextColumn('Ticker', disabled=True),
+                'Target Instrumento %':    st.column_config.NumberColumn('Target Instrumento %', format="%.2f%%"),
+                'Peso Real %':             st.column_config.NumberColumn('Peso Real %', format="%.2f%%", disabled=True),
+                'Desvío %':                st.column_config.NumberColumn('Desvío %', format="%.2f%%", disabled=True),
+                '✓':                       st.column_config.TextColumn('Estado', disabled=True),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="master_strategy_editor"
+        )
+
+        st.warning("⚠️ **Acordate de guardar** los cambios de targets de instrumento con el botón de abajo.")
+
+        if st.button("💾 Guardar targets de instrumento"):
+            # Apply edited instrument targets back to portfolio (skip subtotal rows)
+            new_port = st.session_state.portfolio.copy()
+            for _, row in edited_master.iterrows():
+                ticker = str(row.get('Ticker','')).strip()
+                if not ticker or ticker == '':
+                    continue  # skip subtotal rows
+                if ticker in new_port['Ticker'].values:
+                    new_port.loc[new_port['Ticker']==ticker, 'Target_%'] = float(row['Target Instrumento %'])
+
+            # Validate sector sums vs sector targets
+            warnings_list = []
+            for sec in sectores_cartera:
+                target_sec = st.session_state.sector_targets.get(sec, 0.0)
+                sum_inst   = new_port[new_port['Sector']==sec]['Target_%'].sum()
+                if abs(sum_inst - target_sec) > 0.5:
+                    warnings_list.append(f"**{sec}**: instrumentos suman {sum_inst:.1f}% pero target sector es {target_sec:.1f}%")
+
+            if warnings_list:
+                for w in warnings_list:
+                    st.warning(f"⚠️ {w}")
+
+            st.session_state.portfolio = new_port
+            save_persistent(
+                st.session_state.portfolio,
+                st.session_state.instruments,
+                st.session_state.sectors,
+                st.session_state.sector_targets
+            )
+            st.success("✅ Targets de instrumento guardados")
+            st.rerun()
+
+        with st.expander("📖 ¿Cómo usar esta pestaña?"):
+            st.markdown("""
+- **Paso 1**: Definí el % objetivo de cada sector. Al guardar, los instrumentos se redistribuyen proporcionalmente.
+- **Paso 2**: Ajustá fino el target de cada instrumento dentro del sector. La columna ✓ te indica si la suma de instrumentos coincide con el target del sector.
+- **Verde ✅**: la suma de instrumentos = target del sector. Todo alineado.
+- **Amarillo ⚠️**: hay diferencia — los instrumentos no suman el target del sector.
+- Los cambios se guardan en disco y persisten entre sesiones.
+            """)
+
+
+# ══════════════════════════════════════════
+#  TAB 4 — CORRELACIÓN
+# ══════════════════════════════════════════
+with tabs[5]:
     st.subheader("🔗 Correlación (datos reales)")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -969,7 +1185,7 @@ with tabs[4]:
 - ⚠️ Correlación **>0.80** es una alerta: esos activos se comportan casi igual y no agregan diversificación real.
 - El gráfico de correlación móvil muestra si la relación entre dos activos cambia con el tiempo — lo ideal es que sea estable y baja.
             """)
-with tabs[5]:
+with tabs[6]:
     st.subheader("📐 Métricas reales")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1070,7 +1286,7 @@ with tabs[5]:
 # ══════════════════════════════════════════
 #  TAB 6 — RENDIMIENTO
 # ══════════════════════════════════════════
-with tabs[6]:
+with tabs[7]:
     st.subheader("📈 Rendimiento acumulado")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1162,7 +1378,7 @@ with tabs[6]:
 # ══════════════════════════════════════════
 #  TAB 7 — VaR
 # ══════════════════════════════════════════
-with tabs[7]:
+with tabs[8]:
     st.subheader("⚠️ Value at Risk (VaR) — 95% de confianza")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1238,7 +1454,7 @@ with tabs[7]:
 # ══════════════════════════════════════════
 #  TAB 6 — STRESS TEST
 # ══════════════════════════════════════════
-with tabs[8]:
+with tabs[9]:
     st.subheader("🔥 Stress Test")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1345,7 +1561,7 @@ with tabs[8]:
 # ══════════════════════════════════════════
 #  TAB 9 — FRONTERA EFICIENTE
 # ══════════════════════════════════════════
-with tabs[9]:
+with tabs[10]:
     st.subheader("🌐 Frontera Eficiente de Markowitz")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1460,7 +1676,7 @@ with tabs[9]:
 # ══════════════════════════════════════════
 #  TAB 7 — BLACK-LITTERMAN
 # ══════════════════════════════════════════
-with tabs[10]:
+with tabs[11]:
     st.subheader("🧠 Black-Litterman")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")
@@ -1590,7 +1806,7 @@ with tabs[10]:
 # ══════════════════════════════════════════
 #  TAB 8 — MONTE CARLO
 # ══════════════════════════════════════════
-with tabs[11]:
+with tabs[12]:
     st.subheader("🎲 Monte Carlo")
     if st.session_state.portfolio.empty:
         st.info("Cargá tu cartera primero")

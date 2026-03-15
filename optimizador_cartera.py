@@ -284,8 +284,25 @@ def calc_metrics(prices, weights=None, rf=0.02):
     return metrics, returns
 
 def portfolio_metrics(weights_arr, returns_df, rf=0.02):
-    port_ret = np.dot(weights_arr, returns_df.mean()) * 252
-    port_vol = np.sqrt(np.dot(weights_arr, np.dot(returns_df.cov() * 252, weights_arr)))
+    # Drop columns with insufficient data, realign weights
+    clean = returns_df.dropna(axis=1, thresh=max(30, len(returns_df)//2))
+    clean = clean.dropna()
+    if clean.empty or len(clean.columns) == 0:
+        return np.nan, np.nan, np.nan
+    # Realign weights to surviving columns
+    if len(weights_arr) != len(clean.columns):
+        idx = [i for i, c in enumerate(returns_df.columns) if c in clean.columns]
+        weights_arr = np.array([weights_arr[i] for i in idx])
+        w_sum = weights_arr.sum()
+        if w_sum > 0:
+            weights_arr = weights_arr / w_sum
+        else:
+            weights_arr = np.ones(len(clean.columns)) / len(clean.columns)
+    port_ret = np.dot(weights_arr, clean.mean()) * 252
+    cov = clean.cov() * 252
+    port_vol = np.sqrt(np.dot(weights_arr, np.dot(cov, weights_arr)))
+    if port_vol == 0 or np.isnan(port_vol):
+        return np.nan, np.nan, np.nan
     sharpe = (port_ret - rf) / port_vol
     return port_ret, port_vol, sharpe
 
@@ -1598,7 +1615,9 @@ with tabs[7]:
         if len(available) < 2:
             st.warning("Se necesitan al menos 2 tickers con datos disponibles")
         else:
-            prices_clean = prices[available].ffill().bfill().dropna(how='all')
+            prices_clean = prices[available].ffill().bfill()
+            prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+            available = list(prices_clean.columns)
             returns = prices_clean.pct_change().dropna()
             corr = returns.corr().round(3)
 
@@ -1673,7 +1692,9 @@ with tabs[8]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
-        prices_clean = prices[available].ffill().bfill().dropna(how='all')
+        prices_clean = prices[available].ffill().bfill()
+        prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+        available = list(prices_clean.columns)
         # Drop tickers with fewer than 30 data points
         valid_tickers = [t for t in available if prices_clean[t].notna().sum() >= 30]
         dropped = [t for t in available if t not in valid_tickers]
@@ -1773,7 +1794,9 @@ with tabs[9]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
-        prices_clean = prices[available].ffill().bfill().dropna(how='all')
+        prices_clean = prices[available].ffill().bfill()
+        prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+        available = list(prices_clean.columns)
 
         weights_actual = np.array([float(df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]) if len(df_port[df_port['Ticker']==t]) > 0 else 0.0 for t in available])
         _w2_sum = weights_actual.sum()
@@ -1866,7 +1889,9 @@ with tabs[10]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
-        prices_clean = prices[available].ffill().bfill().dropna(how='all')
+        prices_clean = prices[available].ffill().bfill()
+        prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+        available = list(prices_clean.columns)
         returns_all = prices_clean.pct_change().dropna()
 
         raw_weights = []
@@ -2058,8 +2083,11 @@ with tabs[12]:
         if len(available) < 2:
             st.warning("Se necesitan al menos 2 activos con datos.")
         else:
-            prices_clean = prices[available].ffill().bfill().dropna(how='all')
+            prices_clean = prices[available].ffill().bfill()
+            # Drop columns with too many NaN (e.g. tickers with short history)
+            prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
             returns_fe = prices_clean.pct_change().dropna()
+            available = list(prices_clean.columns)  # update available after cleaning
             min_w = st.session_state.get('min_weight', 0.0)
 
             with st.spinner("Calculando frontera eficiente (puede tardar ~20 segundos)..."):
@@ -2172,7 +2200,9 @@ with tabs[13]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
-        prices_clean = prices[available].ffill().bfill().dropna(how='all')
+        prices_clean = prices[available].ffill().bfill()
+        prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+        available = list(prices_clean.columns)
         returns = prices_clean.pct_change().dropna()
 
         st.markdown("#### Ingresá tus views (expectativas de retorno)")

@@ -726,6 +726,7 @@ with tabs[1]:
                         elif 'sector' in hl and 'macro' not in hl: col_map['Sector_Detalle'] = i
                         elif 'renta' in hl and 'rendimiento' not in hl: col_map['Renta'] = i
                         elif 'pa' in hl and 'is' in hl: col_map['Pais'] = i
+                        elif 'target' in hl and 'sector' in hl: col_map['Target_Sector'] = i
 
                     # Also check for "V. Actual" specifically (col index 8 based on our reading)
                     if 'V_Actual' not in col_map:
@@ -766,17 +767,24 @@ with tabs[1]:
                         # Moneda del instrumento (naturaleza) directo del Excel
                         moneda_excel = str(row[col_map.get('Moneda', 22)] or '').strip()
 
+                        # Target sector desde columna Excel
+                        try:
+                            target_sector_val = float(row[col_map.get('Target_Sector', 26)] or 0)
+                        except:
+                            target_sector_val = 0.0
+
                         data_rows.append({
                             'Ticker':         ticker,
                             'Descripcion':    str(row[col_map.get('Descripcion',1)] or '').strip(),
-                            'V_Actual_Num':   v_actual_num,   # número puro
-                            'Es_USD_Real':    es_usd_real,    # True = hay que multiplicar por TC
-                            'Moneda':         moneda_excel,   # Dolares / Pesos (naturaleza del instrumento)
+                            'V_Actual_Num':   v_actual_num,
+                            'Es_USD_Real':    es_usd_real,
+                            'Moneda':         moneda_excel,
                             'Sector_Macro':   str(row[col_map.get('Sector_Macro',25)] or '').strip(),
                             'Sector_Detalle': str(row[col_map.get('Sector_Detalle',24)] or '').strip(),
                             'Renta':          str(row[col_map.get('Renta',18)] or '').strip(),
                             'Pais':           str(row[col_map.get('Pais',23)] or '').strip(),
                             'Instrumento':    str(row[16] or '').strip(),
+                            'Target_Sector':  target_sector_val,  # % como decimal (0.15 = 15%)
                         })
 
                     if not data_rows:
@@ -810,6 +818,21 @@ with tabs[1]:
                         if st.button("✅ Confirmar e importar cartera", type="primary"):
                             st.session_state.balanz_data        = df_balanz
                             st.session_state.balanz_usd_tickers = usd_reales
+
+                            # ── Leer targets de sector desde "Sector Macro - Target" ──
+                            sector_targets_excel = {}
+                            try:
+                                wb_targets = openpyxl.load_workbook(uploaded_balanz, read_only=True, keep_vba=True, data_only=True)
+                                if 'Sector Macro - Target' in wb_targets.sheetnames:
+                                    ws_t = wb_targets['Sector Macro - Target']
+                                    for trow in ws_t.iter_rows(values_only=True):
+                                        if trow[1] and trow[2] is not None:
+                                            sector_name = str(trow[1]).strip()
+                                            target_val  = float(trow[2])
+                                            if sector_name and sector_name != 'Sector Macro' and sector_name != 'Total':
+                                                sector_targets_excel[sector_name] = target_val
+                            except:
+                                pass
 
                             # Tipos que NO van al análisis cuantitativo
                             EXCLUIR_ANALISIS = {'Bonos en U$', 'FCI Money Market', 'Plazo Fijo',
@@ -882,13 +905,35 @@ with tabs[1]:
                                         sectores_limpios.append(sd)
                             if 'Otro' not in sectores_limpios:
                                 sectores_limpios.append('Otro')
+
+                            # ── Leer targets de sector desde solapa "Sector Macro - Target" ──
+                            sector_targets_excel = {}
+                            try:
+                                uploaded_balanz.seek(0)
+                                wb_t = openpyxl.load_workbook(uploaded_balanz, read_only=True, keep_vba=True, data_only=True)
+                                if 'Sector Macro - Target' in wb_t.sheetnames:
+                                    for trow in wb_t['Sector Macro - Target'].iter_rows(values_only=True):
+                                        if trow[1] and trow[2] is not None:
+                                            sname = str(trow[1]).strip()
+                                            if sname and sname not in ('Sector Macro', 'Total'):
+                                                sector_targets_excel[sname] = float(trow[2])
+                                                # Agregar al listado de sectores si no está
+                                                if sname not in sectores_limpios:
+                                                    sectores_limpios.append(sname)
+                            except Exception as e_t:
+                                st.warning(f"No se pudo leer 'Sector Macro - Target': {e_t}")
+
                             st.session_state.sectors = sectores_limpios
+
+                            if sector_targets_excel:
+                                st.session_state.sector_targets = sector_targets_excel
+                                st.info(f"✅ Targets de sector importados desde Excel: {len(sector_targets_excel)} sectores")
 
                             save_persistent(
                                 st.session_state.portfolio,
                                 st.session_state.instruments,
                                 st.session_state.sectors,
-                                st.session_state.get('sector_targets', {})
+                                st.session_state.sector_targets
                             )
 
                             total = df_balanz['V_Actual_Pesos'].sum()

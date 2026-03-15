@@ -834,20 +834,23 @@ with tabs[1]:
                             except:
                                 pass
 
-                            # Tipos que NO van al análisis cuantitativo
-                            EXCLUIR_ANALISIS = {'Bonos en U$', 'FCI Money Market', 'Plazo Fijo',
-                                                'U$ efectivo', '$ Efectivo', 'Bitcoin'}
+                            # Tipos que NO van al análisis cuantitativo (YF)
+                            EXCLUIR_YF = {'Bonos en U$', 'FCI Money Market', 'Plazo Fijo',
+                                          'U$ efectivo', '$ Efectivo'}
+                            # Tipos que NO van al peso de cartera (excluir de RV)
+                            EXCLUIR_PESO = {'Bonos en U$', 'FCI Money Market', 'Plazo Fijo',
+                                            'U$ efectivo', '$ Efectivo'}
 
                             # ── Solo renta variable para cartera de análisis ──
                             df_rv = df_balanz[df_balanz['Renta'].str.strip() == 'Variable'].copy()
-                            total_rv_pesos = df_rv['V_Actual_Pesos'].sum()
+                            # Excluir bonos/FCIs del cálculo de pesos pero mantener Bitcoin
+                            df_rv_peso = df_rv[~df_rv['Instrumento'].isin(EXCLUIR_PESO)]
+                            total_rv_pesos = df_rv_peso['V_Actual_Pesos'].sum()
 
                             portfolio_rows = []
                             inst_rows      = []
-                            for _, irow in df_rv.iterrows():
+                            for _, irow in df_rv_peso.iterrows():
                                 instrumento = str(irow.get('Instrumento', '')).strip()
-                                if instrumento in EXCLUIR_ANALISIS:
-                                    continue
                                 ticker_orig = irow['Ticker']
 
                                 # Mapeo explícito: Balanz ticker → YF ticker
@@ -870,6 +873,8 @@ with tabs[1]:
 
                                 if instrumento == 'Acciones ARG':
                                     ticker_yf = TICKER_MAP.get(ticker_orig, ticker_orig)
+                                elif instrumento == 'Bitcoin':
+                                    ticker_yf = 'BTC-USD'  # YF ticker para Bitcoin
                                 else:
                                     ticker_yf = ticker_orig  # Cedears ya están en YF en USD
 
@@ -2255,4 +2260,232 @@ with tabs[13]:
         st.caption("q % anual = tu expectativa de retorno anual para ese activo | Confianza 0–1 = cuánto confiás en ese view")
 
         views_q, views_conf = {}, {}
-        co
+        cols = st.columns(3)
+        for i, ticker in enumerate(available):
+            with cols[i % 3]:
+                st.markdown(f"**{ticker}**")
+                c1, c2 = st.columns(2)
+                views_q[ticker] = c1.number_input(f"q % {ticker}", value=15.0, step=1.0, key=f"q_{ticker}") / 100
+                views_conf[ticker] = c2.number_input(f"conf {ticker}", value=0.7, min_value=0.0, max_value=1.0, step=0.05, key=f"c_{ticker}")
+
+        if st.button("🧠 Correr Black-Litterman", type="primary"):
+            w_actual = np.array([float(df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]) if len(df_port[df_port['Ticker']==t]) > 0 else 0.0 for t in available])
+            _w4_sum = w_actual.sum()
+            w_actual = (w_actual / _w4_sum) if _w4_sum > 0 else np.ones(len(available)) / len(available)
+
+            posterior_mu = black_litterman(w_actual, returns, views_q, views_conf, rf=rf_rate)
+            prior_mu = returns.mean() * 252
+
+            # Read sidebar settings
+            min_w = st.session_state.get('min_weight', 0.0)
+            target_ret = st.session_state.get('target_return', None)
+
+            # Optimal BL weights
+            w_bl = max_sharpe(returns, rf=rf_rate, min_weight=min_w)
+            w_minvar = min_variance(returns, min_weight=min_w)
+
+            # Target return portfolio (if enabled)
+            w_target = None
+            if target_ret is not None:
+                w_target = target_return_weights(returns, target_ret, min_weight=min_w)
+                if w_target is None:
+                    st.warning(f"⚠️ No se encontró solución para retorno objetivo {target_ret*100:.1f}% — puede estar fuera del rango alcanzable con estos activos.")
+
+            # Results table
+            bl_df = pd.DataFrame({
+                'Ticker': available,
+                'Prior (eq.) %': (prior_mu.values * 100).round(2),
+                'Posterior BL %': (posterior_mu.values * 100).round(2),
+                'Delta %': ((posterior_mu.values - prior_mu.values) * 100).round(2),
+                'Peso BL %': (w_bl * 100).round(2),
+                'Peso Actual %': (w_actual * 100).round(2),
+            }).sort_values('Delta %', ascending=False)
+
+            st.dataframe(bl_df, use_container_width=True, hide_index=True)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                colors_bl = ['rgba(74,222,128,.8)' if v>=0 else 'rgba(248,113,113,.8)'
+                    for v in bl_df['Delta %']]
+                fig = go.Figure(go.Bar(x=bl_df['Ticker'], y=bl_df['Delta %'],
+                    marker_color=colors_bl, text=bl_df['Delta %'].astype(str)+'%',
+                    textposition='outside'))
+                fig.update_layout(title='Delta BL (Posterior − Prior)',
+                    paper_bgcolor='#111827', plot_bgcolor='#111827',
+                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='puntos % anual', legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
+                st.plotly_chart(fig, use_container_width=True)
+
+            with col2:
+                fig2 = go.Figure()
+                fig2.add_trace(go.Bar(name='Actual %', x=bl_df['Ticker'],
+                    y=bl_df['Peso Actual %'], marker_color='rgba(0,212,255,.7)'))
+                fig2.add_trace(go.Bar(name='BL Optimo %', x=bl_df['Ticker'],
+                    y=bl_df['Peso BL %'], marker_color='rgba(255,107,53,.7)'))
+                fig2.update_layout(barmode='group', title='Pesos: Actual vs BL Óptimo',
+                    paper_bgcolor='#111827', plot_bgcolor='#111827',
+                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%', legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
+                st.plotly_chart(fig2, use_container_width=True)
+
+            # Frontier scatter
+            port_actual = portfolio_metrics(w_actual, returns, rf_rate)
+            port_bl = portfolio_metrics(w_bl, returns, rf_rate)
+            port_mv = portfolio_metrics(w_minvar, returns, rf_rate)
+
+            scatter_ports = [
+                ('Actual',      port_actual, '#00d4ff', 'x'),
+                ('BL Óptimo',   port_bl,     '#f87171', 'square'),
+                ('Min Varianza',port_mv,     '#4ade80', 'circle'),
+            ]
+            if w_target is not None:
+                port_tgt = portfolio_metrics(w_target, returns, rf_rate)
+                scatter_ports.append((f'Ret.Obj {target_ret*100:.0f}%', port_tgt, '#fbbf24', 'diamond'))
+
+            fig3 = go.Figure()
+            for label, stats, color, symbol in scatter_ports:
+                fig3.add_trace(go.Scatter(x=[stats[1]*100], y=[stats[0]*100],
+                    mode='markers+text', name=f"{label} (Sharpe:{stats[2]:.2f})",
+                    text=[label], textposition='top center',
+                    marker=dict(size=16, color=color, symbol=symbol,
+                        line=dict(width=2, color=color))))
+            fig3.update_layout(title='Frontera Eficiente: Actual vs BL vs MinVar',
+                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
+                xaxis_title='Volatilidad %', yaxis_title='Retorno %',
+                legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
+            st.plotly_chart(fig3, use_container_width=True)
+
+            # Store for MC — prefer target return portfolio if set
+            best = port_tgt if (w_target is not None) else port_bl
+            st.session_state['bl_stats'] = {
+                'ret_bl': best[0], 'vol_bl': best[1]
+            }
+
+            with st.expander("📖 ¿Cómo interpretar Black-Litterman?"):
+                st.markdown("""
+- **Black-Litterman** combina el equilibrio del mercado con tus propias expectativas (views) para calcular pesos óptimos.
+- **Prior (equilibrio)**: es el retorno implícito que el mercado "espera" de cada activo basado en su comportamiento histórico.
+- **Posterior BL**: es el retorno ajustado incorporando tu view. Si confiás 100% en tu view, el posterior = tu expectativa. Si confiás 0%, el posterior = el prior del mercado.
+- **Delta %**: cuánto cambió la expectativa de retorno al incorporar tu view. Verde = subió, rojo = bajó.
+- **Peso BL %**: la asignación óptima que maximiza el Sharpe con los retornos posteriores. Cuanto mayor el retorno esperado ajustado y menor la correlación con el resto, mayor será el peso sugerido.
+- **Confianza 0–1**: 0 = ignorás tu view completamente, 1 = confiás ciegamente en tu expectativa.
+- 💡 Tip: empezá con confianza 0.5–0.7 y ajustá según qué tan seguro estás de tu análisis.
+                """)
+
+
+# ══════════════════════════════════════════
+#  TAB 8 — MONTE CARLO
+# ══════════════════════════════════════════
+with tabs[14]:
+    st.subheader("🎲 Monte Carlo")
+    if st.session_state.portfolio.empty:
+        st.info("Cargá tu cartera primero")
+    elif st.session_state.hist_data is None:
+        st.warning("⬅️ Cargá datos de mercado primero")
+    else:
+        df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
+        total = df_port['Total'].iloc[0]
+        port_stats = st.session_state.get('port_stats', {'ret':0.18,'vol':0.22})
+        bl_stats = st.session_state.get('bl_stats', None)
+
+        col1, col2, col3 = st.columns(3)
+        n_sims = col1.number_input("N° simulaciones", value=500, min_value=100, max_value=2000, step=100)
+        n_days = col2.number_input("Días de trading", value=252, min_value=60, max_value=756, step=21)
+        show_paths = col3.number_input("Trayectorias a mostrar", value=60, min_value=10, max_value=200, step=10)
+
+        if st.button("🎲 Correr simulación", type="primary"):
+            mu_act = port_stats['ret']
+            vol_act = port_stats['vol']
+            mu_bl = bl_stats['ret_bl'] if bl_stats else mu_act * 1.15
+            vol_bl = bl_stats['vol_bl'] if bl_stats else vol_act * 0.88
+
+            with st.spinner("Simulando..."):
+                paths_act = monte_carlo(mu_act, vol_act, total, int(n_sims), int(n_days))
+                paths_bl  = monte_carlo(mu_bl,  vol_bl,  total, int(n_sims), int(n_days))
+
+            mean_act = paths_act.mean(axis=0)
+            mean_bl  = paths_bl.mean(axis=0)
+            days_x = list(range(int(n_days)+1))
+
+            # MC chart
+            fig = go.Figure()
+            step = max(1, int(n_sims)//int(show_paths))
+            for i in range(0, int(n_sims), step):
+                fig.add_trace(go.Scatter(x=days_x, y=paths_act[i], mode='lines',
+                    line=dict(color='rgba(0,212,255,0.06)', width=1), showlegend=False))
+                fig.add_trace(go.Scatter(x=days_x, y=paths_bl[i], mode='lines',
+                    line=dict(color='rgba(255,107,53,0.06)', width=1), showlegend=False))
+            fig.add_trace(go.Scatter(x=days_x, y=mean_act, mode='lines', name='Media Actual',
+                line=dict(color='#00d4ff', width=3)))
+            fig.add_trace(go.Scatter(x=days_x, y=mean_bl, mode='lines', name='Media BL Optimizada',
+                line=dict(color='#ff6b35', width=3)))
+            fig.update_layout(
+                title=f'Proyección Monte Carlo ({int(n_days)} días) — Capital inicial: {fmt_usd(total)}',
+                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
+                xaxis_title='Días de Trading', yaxis_title='Valor USD',
+                yaxis=dict(tickformat='$,.0f'),
+                legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
+            st.plotly_chart(fig, use_container_width=True)
+
+            final_act = paths_act[:, -1]
+            final_bl  = paths_bl[:, -1]
+            med_act = final_act.mean()
+            med_bl  = final_bl.mean()
+            gain = (med_bl - med_act) / med_act * 100
+
+            m1,m2,m3,m4,m5,m6 = st.columns(6)
+            m1.metric("Capital inicial", fmt_usd(total))
+            m2.metric("Media Actual (1 año)", fmt_usd(med_act))
+            m3.metric("Media BL Optimizada", fmt_usd(med_bl), delta=f"+{gain:.1f}%")
+            m4.metric("Peor 5% Actual", fmt_usd(np.percentile(final_act,5)))
+            m5.metric("Peor 5% BL", fmt_usd(np.percentile(final_bl,5)))
+            m6.metric("Mejor 95% BL", fmt_usd(np.percentile(final_bl,95)))
+
+            col1, col2 = st.columns(2)
+            with col1:
+                all_vals = np.concatenate([final_act, final_bl])
+                bins = np.linspace(all_vals.min(), all_vals.max(), 35)
+                hist_act, _ = np.histogram(final_act, bins=bins)
+                hist_bl,  _ = np.histogram(final_bl,  bins=bins)
+                bin_centers = (bins[:-1] + bins[1:]) / 2
+
+                fig2 = go.Figure()
+                fig2.add_trace(go.Bar(x=bin_centers, y=hist_act,
+                    name=f'Actual (Media: {fmt_usd(med_act)})',
+                    marker_color='rgba(0,212,255,0.55)'))
+                fig2.add_trace(go.Bar(x=bin_centers, y=hist_bl,
+                    name=f'BL Optim (Media: {fmt_usd(med_bl)})',
+                    marker_color='rgba(255,107,53,0.55)'))
+                fig2.update_layout(barmode='overlay', title='Distribución de valor final',
+                    paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
+                    xaxis=dict(tickformat='$,.0f'), yaxis_title='Frecuencia',
+                    legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
+                st.plotly_chart(fig2, use_container_width=True)
+
+            with col2:
+                pcts = [5,10,25,50,75,90,95]
+                fig3 = go.Figure()
+                fig3.add_trace(go.Bar(x=[f'P{p}' for p in pcts],
+                    y=[np.percentile(final_act,p) for p in pcts],
+                    name='Actual', marker_color='rgba(0,212,255,0.7)'))
+                fig3.add_trace(go.Bar(x=[f'P{p}' for p in pcts],
+                    y=[np.percentile(final_bl,p) for p in pcts],
+                    name='BL Optim', marker_color='rgba(255,107,53,0.7)'))
+                fig3.update_layout(barmode='group', title='Percentiles de resultado',
+                    paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
+                    yaxis=dict(tickformat='$,.0f'),
+                    legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
+                st.plotly_chart(fig3, use_container_width=True)
+
+            with st.expander("📖 ¿Cómo interpretar Monte Carlo?"):
+                st.markdown("""
+- La simulación genera **500 trayectorias posibles** de tu cartera durante 1 año (252 días hábiles), usando el retorno y volatilidad históricos.
+- **Línea azul** = trayectoria promedio de tu cartera actual.
+- **Línea naranja** = trayectoria promedio de la cartera optimizada con Black-Litterman.
+- Las trayectorias tenues de fondo muestran la dispersión real de escenarios posibles — arriba y abajo.
+- **Distribución final**: el histograma muestra en cuántas simulaciones terminaste en cada rango de valor. Una distribución más ancha = más incertidumbre.
+- **Percentiles**:
+  - P5 = peor escenario probable (solo 5% de simulaciones terminaron peor que esto)
+  - P50 = resultado mediano esperado
+  - P95 = mejor escenario probable (solo 5% terminaron mejor que esto)
+- 💡 La diferencia entre la cartera Actual y BL Optimizada refleja el impacto de los pesos sugeridos por Black-Litterman.
+- ⚠️ Monte Carlo asume retornos normales y distribución estable — en crisis reales, las colas son más gruesas.
+                """)

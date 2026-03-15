@@ -1252,21 +1252,30 @@ with tabs[4]:
         sector_group['Monto_USD'] = sector_group['Monto_USD'].apply(fmt_usd)
         sector_group['Peso_Actual'] = sector_group['Peso_Actual'].round(2)
 
+        # Tabla con columnas en orden lógico y Desvío visible
+        df_table = sector_group[['Sector','Monto_USD','Peso_Actual','Target_%','Desvío_%','Tickers']].copy()
+        df_table.columns = ['Sector','Monto USD','Peso Actual %','Target %','Desvío %','Activos']
         st.dataframe(
-            sector_group.rename(columns={
-                'Sector':'Sector','Monto_USD':'Monto USD','Peso_Actual':'Peso Actual %',
-                'Target_%':'Target %','Desvío_%':'Desvío %','Tickers':'Activos'
-            }),
+            df_table,
+            column_config={
+                'Desvío %': st.column_config.NumberColumn('Desvío %', format="%.2f%%"),
+                'Peso Actual %': st.column_config.NumberColumn('Peso Actual %', format="%.2f%%"),
+                'Target %': st.column_config.NumberColumn('Target %', format="%.2f%%"),
+            },
             use_container_width=True, hide_index=True
         )
 
-        # Alerts
+        # Alerts — incluye sectores con target=0 pero peso real>0 (sobrecomprado sin target)
         for _, row in sector_group.iterrows():
-            if row['Target_%'] > 0 and abs(row['Desvío_%']) > 2:
-                icon = "📈" if row['Desvío_%'] > 0 else "📉"
-                color = "orange" if row['Desvío_%'] > 0 else "blue"
-                st.warning(f"{icon} **{row['Sector']}**: sobrecomprado en {row['Desvío_%']:.2f}%" if row['Desvío_%']>0
-                    else f"{icon} **{row['Sector']}**: subcomprado en {abs(row['Desvío_%']):.2f}%")
+            desv = row['Desvío_%']
+            tgt  = row['Target_%']
+            if abs(desv) > 1:
+                if desv > 0 and tgt == 0:
+                    st.warning(f"⚠️ **{row['Sector']}**: tenés {row['Peso_Actual']:.1f}% invertido pero el target es 0% — considerá si querés mantenerlo")
+                elif desv > 2:
+                    st.warning(f"📈 **{row['Sector']}**: sobrecomprado en {desv:.2f}% (actual {row['Peso_Actual']:.1f}% vs target {tgt:.1f}%)")
+                elif desv < -2 and tgt > 0:
+                    st.info(f"📉 **{row['Sector']}**: subcomprado en {abs(desv):.2f}% (actual {row['Peso_Actual']:.1f}% vs target {tgt:.1f}%)")
 
         # Charts
         col1, col2 = st.columns(2)
@@ -1303,14 +1312,9 @@ with tabs[4]:
         with col3:
             sg_dev = sector_group.copy()
             sg_dev['Peso_Actual_num'] = df.groupby('Sector')['Peso_Actual_%'].sum().reindex(sg_dev['Sector']).values
-            has_targets = (sg_dev['Target_%'] > 0).any()
-            if has_targets:
-                sg_dev = sg_dev[sg_dev['Target_%'] > 0].copy()
-                sg_dev['Desvío_num'] = sg_dev['Peso_Actual_num'] - sg_dev['Target_%']
-            else:
-                avg = sg_dev['Peso_Actual_num'].mean()
-                sg_dev['Desvío_num'] = sg_dev['Peso_Actual_num'] - avg
-            # ✅ Fix 3: ordenado de mayor a menor (mismo criterio que Pareto)
+            sg_dev['Desvío_num'] = sg_dev['Peso_Actual_num'] - sg_dev['Target_%']
+            # Mostrar todos los sectores con peso real > 0 O con target > 0
+            sg_dev = sg_dev[(sg_dev['Peso_Actual_num'] > 0) | (sg_dev['Target_%'] > 0)].copy()
             sg_dev = sg_dev.sort_values('Desvío_num', ascending=False)
             colors_dev = ['rgba(74,222,128,0.8)' if v >= 0 else 'rgba(248,113,113,0.8)'
                 for v in sg_dev['Desvío_num']]

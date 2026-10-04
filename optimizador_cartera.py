@@ -123,6 +123,8 @@ if 'app_loaded' not in st.session_state:
     st.session_state.hist_data      = None
     st.session_state.tickers_loaded  = []
     st.session_state.app_loaded      = True
+if 'bench_data' not in st.session_state:
+    st.session_state.bench_data = None
 if 'balanz_data' not in st.session_state:
     st.session_state.balanz_data = None          # DataFrame importado de Balanz
 if 'balanz_usd_tickers' not in st.session_state:
@@ -150,54 +152,165 @@ def fmt_usd(v):
 def fmt_pct(v):
     return f"{v:.2f}%"
 
+# ─────────────────────────────────────────
+#  CAPA DE DATOS
+# ─────────────────────────────────────────
+# Ticker de Balanz / local → ticker de Yahoo Finance.
+# Acciones argentinas con ADR en NYSE: se usa el ADR (precio real en USD).
+# Acciones argentinas sin ADR: ticker .BA, convertido a USD con CCL implícito.
+TICKER_MAP_YF = {
+    'YPFD': 'YPF', 'PAMP': 'PAM', 'TGSU2': 'TGS', 'CEPU': 'CEPU', 'GGAL': 'GGAL',
+    'BMA': 'BMA', 'BBAR': 'BBAR', 'SUPV': 'SUPV', 'EDN': 'EDN', 'LOMA': 'LOMA',
+    'IRSA': 'IRS', 'CRES': 'CRESY', 'TECO2': 'TEO', 'VIST': 'VIST',
+    'METR': 'METR.BA', 'TGNO4': 'TGNO4.BA',
+    'BRKB': 'BRK-B', 'BRK.B': 'BRK-B', 'BTC': 'BTC-USD',
+}
+
+def yf_ticker(t):
+    t = str(t).strip()
+    return TICKER_MAP_YF.get(t.upper(), t)
+
+BENCHMARK = 'SPY'
+
+def _calcular_ccl(px_):
+    """CCL implícito diario a partir de un par local/ADR. Devuelve (serie, fuente) o (None, None)."""
+    pares = [('YPFD.BA', 'YPF', 1.0, 'YPF'), ('GGAL.BA', 'GGAL', 10.0, 'GGAL')]
+    for local, adr, ratio, nombre in pares:
+        if local in px_.columns and adr in px_.columns:
+            c = px_[local].ffill(limit=3) * ratio / px_[adr].ffill(limit=3)
+            c = c.replace([np.inf, -np.inf], np.nan)
+            if c.notna().sum() > 60:
+                # filtrar saltos espurios por feriados no coincidentes (desvío >10% vs mediana de 5 días)
+                med = c.rolling(5, center=True, min_periods=1).median()
+                c[(c / med - 1).abs() > 0.10] = np.nan
+                return c.ffill(), nombre
+    return None, None
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_data(tickers, period="5y"):
-    """Fetch historical closing prices from Yahoo Finance.
-    Tickers that end in .BA cotizan en ARS — se convierten a USD usando ARS=X."""
-    tickers = [str(t).strip() for t in tickers if t and str(t).strip()]
+    """Descarga precios de cierre ajustados de Yahoo Finance, todos expresados en USD
+    y alineados a los días hábiles del mercado de EEUU.
+    Devuelve (precios, benchmark_SPY, notas)."""
+    tickers = list(dict.fromkeys(yf_ticker(t) for t in tickers if t and str(t).strip()))
     if not tickers:
-        st.error("No hay tickers válidos para descargar.")
-        return None
-
-    # Separate ARS tickers from USD tickers
+        return None, None, ["No hay tickers válidos para descargar."]
+    notas = []
     ars_tickers = [t for t in tickers if t.upper().endswith('.BA')]
-    usd_tickers = [t for t in tickers if not t.upper().endswith('.BA')]
-
+    extra = [BENCHMARK]
+    if ars_tickers:
+        extra += ['YPF', 'YPFD.BA', 'GGAL', 'GGAL.BA', 'ARS=X']
+    descarga = list(dict.fromkeys(tickers + extra))
     try:
-        all_download = list(set(usd_tickers + ars_tickers))
-        # Add ARS=X if we have ARS tickers
-        if ars_tickers:
-            all_download.append('ARS=X')
-
-        raw = yf.download(all_download, period=period, auto_adjust=True, progress=False)
-        if isinstance(raw.columns, pd.MultiIndex):
-            prices = raw['Close']
-        else:
-            prices = raw[['Close']] if 'Close' in raw.columns else raw
-        if len(all_download) == 1 and isinstance(prices, pd.DataFrame):
-            prices.columns = all_download
-
-        prices = prices.dropna(how='all')
-
-        # Convert ARS tickers to USD
-        if ars_tickers and 'ARS=X' in prices.columns:
-            fx = prices['ARS=X'].ffill().bfill()
-            for t in ars_tickers:
-                if t in prices.columns:
-                    prices[t] = prices[t] / fx
-            prices = prices.drop(columns=['ARS=X'], errors='ignore')
-        elif ars_tickers:
-            # ARS=X not available — drop ARS tickers to avoid bad data
-            prices = prices.drop(columns=ars_tickers, errors='ignore')
-
-        # Keep only requested tickers
-        final_cols = [t for t in tickers if t in prices.columns]
-        prices = prices[final_cols].dropna(how='all')
-        return prices
-
+        raw = yf.download(descarga, period=period, auto_adjust=True, progress=False)
     except Exception as e:
-        st.error(f"Error al descargar datos: {e}")
-        return None
+        return None, None, [f"Error al descargar datos: {e}"]
+    if raw is None or len(raw) == 0:
+        return None, None, ["Yahoo Finance no devolvió datos."]
+    px_ = raw['Close'] if isinstance(raw.columns, pd.MultiIndex) else raw[['Close']].rename(columns={'Close': descarga[0]})
+    px_ = px_.dropna(how='all')
+
+    if BENCHMARK not in px_.columns or px_[BENCHMARK].dropna().empty:
+        return None, None, ["No se pudo descargar el benchmark (SPY)."]
+    dias = px_[BENCHMARK].dropna().index   # calendario de EEUU (saca fines de semana de BTC)
+
+    if ars_tickers:
+        ccl, fuente = _calcular_ccl(px_)
+        if ccl is None and 'ARS=X' in px_.columns:
+            ccl, fuente = px_['ARS=X'].ffill(), None
+            notas.append("⚠️ No se pudo calcular el CCL implícito; las acciones argentinas sin ADR se convirtieron con el dólar oficial (ARS=X). Sus retornos en USD pueden estar distorsionados.")
+        if ccl is None:
+            notas.append(f"⚠️ Sin tipo de cambio disponible: se excluyen {', '.join(ars_tickers)}.")
+            px_ = px_.drop(columns=ars_tickers, errors='ignore')
+        else:
+            for t in ars_tickers:
+                if t in px_.columns:
+                    px_[t] = px_[t].ffill(limit=3) / ccl
+            if fuente:
+                notas.append(f"💱 Acciones argentinas sin ADR ({', '.join(ars_tickers)}) convertidas a USD con CCL implícito diario (par {fuente}).")
+
+    cols = [t for t in tickers if t in px_.columns and px_[t].dropna().size > 0]
+    faltan = [t for t in tickers if t not in cols]
+    if faltan:
+        notas.append(f"⚠️ Sin datos en Yahoo Finance: {', '.join(faltan)}.")
+    precios = px_[cols].reindex(dias)
+    bench = px_[BENCHMARK].reindex(dias)
+    return precios, bench, notas
+
+def preparar_precios(prices, tickers, min_obs=60):
+    """Prepara una matriz de precios en VENTANA COMÚN (todos los activos con datos reales).
+    No rellena hacia atrás: un activo nuevo no inventa historia con retornos cero."""
+    disp = [t for t in dict.fromkeys(tickers) if t in prices.columns]
+    p = prices[disp].ffill(limit=5)
+    ok = [t for t in disp if p[t].notna().sum() >= min_obs]
+    info = {'excluidos': [t for t in disp if t not in ok], 'inicio': None, 'limitantes': [],
+            'primeros': {}, 'cortos': [], 'min_anios': 0}
+    if not ok:
+        return p[ok], info
+    # Activos con menos historia que el mínimo elegido: quedan fuera del análisis de cartera
+    min_anios = float(st.session_state.get('min_hist_anios', 0) or 0)
+    if min_anios > 0:
+        corte = p.index[-1] - pd.DateOffset(days=int(min_anios * 365.25))
+        cortos = [t for t in ok if p[t].first_valid_index() > corte + pd.Timedelta(days=15)]
+        if len(cortos) < len(ok) - 1:        # siempre dejar al menos 2 activos
+            info['cortos'] = cortos
+            info['min_anios'] = min_anios
+            ok = [t for t in ok if t not in cortos]
+    p = p[ok]
+    primeros = p.apply(lambda s: s.first_valid_index())
+    inicio = primeros.max()
+    umbral = p.index[0] + pd.Timedelta(days=30)
+    info['inicio'] = inicio
+    info['primeros'] = primeros.to_dict()
+    info['limitantes'] = sorted([t for t, d in primeros.items() if d > umbral],
+                                key=lambda t: primeros[t], reverse=True)
+    p = p.loc[inicio:].ffill().dropna(axis=1, how='any')
+    return p, info
+
+def mostrar_aviso_ventana(info):
+    if info.get('cortos'):
+        _pf = st.session_state.portfolio
+        _tot = _pf['Monto_USD'].sum()
+        _pct = _pf[_pf['Ticker'].isin(info['cortos'])]['Monto_USD'].sum() / _tot * 100 if _tot > 0 else 0
+        st.info(f"⏳ Fuera del análisis de cartera por tener menos de {info['min_anios']:g} años de historia: "
+                f"{', '.join(info['cortos'])} (representan {_pct:.1f}% de la renta variable). "
+                f"Podés cambiar ese mínimo en el panel lateral.")
+    if info.get('excluidos'):
+        st.warning(f"⚠️ Sin historia suficiente (excluidos de este cálculo): {', '.join(info['excluidos'])}")
+    if info.get('limitantes') and info.get('inicio') is not None:
+        ini = info['inicio']
+        anios = (pd.Timestamp.today() - ini).days / 365.25
+        lim = ", ".join(f"{t} (desde {info['primeros'][t]:%m/%Y})" for t in info['limitantes'][:5])
+        st.info(f"📅 Ventana común de análisis: desde **{ini:%d/%m/%Y}** ({anios:.1f} años). "
+                f"La limitan los activos con historia más corta: {lim}. "
+                f"Las métricas individuales de cada activo (solapa Métricas) usan su historia completa.")
+
+def pesos_para(df_port, tickers):
+    """Pesos actuales (suman 1) para la lista de tickers dada."""
+    g = df_port.groupby('Ticker')['Peso_Actual_%'].sum()
+    w = np.array([float(g.get(t, 0.0)) for t in tickers])
+    s = w.sum()
+    return w / s if s > 0 else np.ones(len(tickers)) / max(len(tickers), 1)
+
+def serie_cartera(prices, w):
+    """Valor de la cartera (base 1) manteniendo constantes los pesos dados."""
+    r = prices.pct_change().fillna(0).values @ np.asarray(w)
+    return pd.Series(np.cumprod(1 + r), index=prices.index)
+
+def calc_beta(precios_a, precios_b, freq='Semanal'):
+    """Beta = Cov(a, b) / Var(b) con retornos en USD sobre fechas comunes.
+    Semanal (viernes a viernes) es más robusto para activos poco líquidos."""
+    if precios_a is None or precios_b is None:
+        return np.nan
+    df = pd.concat([precios_a, precios_b], axis=1, keys=['a', 'b']).dropna()
+    if str(freq).startswith('Semanal'):
+        df = df.resample('W-FRI').last().dropna()
+        min_n = 26
+    else:
+        min_n = 60
+    r = df.pct_change().dropna()
+    if len(r) < min_n or r['b'].var() == 0:
+        return np.nan
+    return float(r['a'].cov(r['b']) / r['b'].var())
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def validate_tickers(tickers):
@@ -224,64 +337,39 @@ def calc_portfolio_weights(df):
     df['Total'] = total
     return df
 
-def calc_metrics(prices, weights=None, rf=0.02):
-    """Calculate return, volatility, Sharpe, CAGR, Beta vs SPY."""
-    prices = prices.dropna(how='all')
+def calc_metrics(prices, bench=None, rf=0.02, beta_freq='Semanal'):
+    """Métricas por activo, cada uno con SU historia completa disponible."""
     if isinstance(prices, pd.Series):
         prices = prices.to_frame()
-    if len(prices) < 30:
-        raise ValueError("Datos insuficientes para calcular métricas (mínimo 30 días).")
-    returns = prices.pct_change().dropna()
-    if len(returns) == 0:
-        raise ValueError("No hay retornos calculables con los datos disponibles.")
-    annual_ret = returns.mean() * 252
-    annual_vol = returns.std() * np.sqrt(252)
-    sharpe = (annual_ret - rf) / annual_vol
-
-    # CAGR — safe
-    first = prices.iloc[0].replace(0, np.nan)
-    last  = prices.iloc[-1]
-    total_ret = last / first
-    years = max(len(prices) / 252, 0.01)
-    cagr = total_ret ** (1/years) - 1
-
-    metrics = pd.DataFrame({
-        'Retorno Anual %': (annual_ret * 100).round(2),
-        'Volatilidad %': (annual_vol * 100).round(2),
-        'Sharpe': sharpe.round(3),
-        'CAGR %': (cagr * 100).round(2),
-    })
-
-    # Beta vs SPY
-    try:
-        spy_raw = yf.download('SPY', period=f'{max(int(years),1)}y', auto_adjust=True, progress=False)
-        if isinstance(spy_raw.columns, pd.MultiIndex):
-            spy = spy_raw['Close']['SPY'] if 'SPY' in spy_raw['Close'].columns else spy_raw['Close'].iloc[:,0]
-        else:
-            spy = spy_raw['Close'] if 'Close' in spy_raw.columns else spy_raw.iloc[:,0]
-        spy = spy.squeeze()
-        spy_ret = spy.pct_change().dropna()
-        betas = {}
-        for col in returns.columns:
-            s1 = returns[col].dropna()
-            s2 = spy_ret.dropna()
-            common = s1.index.intersection(s2.index)
-            if len(common) > 30:
-                cov_matrix = np.cov(s1.loc[common].values, s2.loc[common].values)
-                betas[col] = round(cov_matrix[0,1] / cov_matrix[1,1], 2) if cov_matrix[1,1] != 0 else np.nan
-            else:
-                betas[col] = np.nan
-        metrics['Beta SPY'] = pd.Series(betas)
-    except Exception as e:
-        metrics['Beta SPY'] = np.nan
-
-    # VaR 95%
-    var_1d = (-returns.quantile(0.05) * 100).round(2)
-    var_10d = (var_1d * np.sqrt(10)).round(2)
-    metrics['VaR 1d 95%'] = var_1d
-    metrics['VaR 10d 95%'] = var_10d
-
-    return metrics, returns
+    filas = {}
+    for col in prices.columns:
+        s = prices[col].dropna()
+        if len(s) < 60:
+            continue
+        r = s.pct_change().dropna()
+        anios = max(len(s) / 252, 0.01)
+        ret_a = r.mean() * 252
+        vol_a = r.std() * np.sqrt(252)
+        downside = np.sqrt((np.minimum(r, 0) ** 2).mean()) * np.sqrt(252)
+        var1 = -r.quantile(0.05) * 100
+        filas[col] = {
+            'Historia desde': s.index[0].strftime('%m/%Y'),
+            'Retorno Anual %': round(ret_a * 100, 2),
+            'CAGR %': round(((s.iloc[-1] / s.iloc[0]) ** (1 / anios) - 1) * 100, 2),
+            'Volatilidad %': round(vol_a * 100, 2),
+            'Sharpe': round((ret_a - rf) / vol_a, 3) if vol_a > 0 else np.nan,
+            'Sortino': round((ret_a - rf) / downside, 3) if downside > 0 else np.nan,
+            'Máx Drawdown %': round((s / s.cummax() - 1).min() * 100, 2),
+            'Beta SPY': round(calc_beta(s, bench, beta_freq), 2) if bench is not None else np.nan,
+            'VaR 1d 95%': round(var1, 2),
+            'VaR 10d 95%': round(var1 * np.sqrt(10), 2),
+        }
+    if not filas:
+        raise ValueError("Datos insuficientes para calcular métricas (mínimo 60 días).")
+    metrics = pd.DataFrame(filas).T
+    num = [c for c in metrics.columns if c != 'Historia desde']
+    metrics[num] = metrics[num].astype(float)
+    return metrics, prices.pct_change()
 
 def portfolio_metrics(weights_arr, returns_df, rf=0.02):
     # Drop columns with insufficient data, realign weights
@@ -389,6 +477,17 @@ with st.sidebar:
     rf_rate = st.number_input("Tasa libre de riesgo (%)", value=2.0, step=0.25,
         help="Tasa anual libre de riesgo (ej: 2%)") / 100
 
+    st.session_state['min_hist_anios'] = st.slider(
+        "Historia mínima para el análisis de cartera (años)", min_value=0.0, max_value=10.0,
+        value=2.0, step=0.5,
+        help="Los activos más nuevos que esto quedan fuera de los cálculos de cartera (correlación, "
+             "VaR, frontera, rendimiento) para no recortar la ventana de todos. "
+             "Igual aparecen en Métricas con su propia historia. 0 = incluir todos.")
+
+    beta_freq = st.selectbox("Frecuencia para calcular Beta", ["Semanal", "Diaria"], index=0,
+        help="Semanal (viernes a viernes) es el estándar para activos poco líquidos como "
+             "las acciones argentinas sin ADR: evita que los días sin operaciones subestimen la beta.")
+
     st.markdown("---")
     st.markdown("### 📐 Opciones avanzadas")
 
@@ -433,7 +532,11 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🚀 Cargar datos de mercado", type="primary", use_container_width=True):
-        all_tickers = st.session_state.portfolio['Ticker'].tolist()
+        # Normalizar tickers a formato Yahoo (ej: BRKB → BRK-B) y analizar solo posiciones con monto > 0
+        _port = st.session_state.portfolio.copy()
+        _port['Ticker'] = _port['Ticker'].map(yf_ticker)
+        st.session_state.portfolio = _port
+        all_tickers = _port.loc[_port['Monto_USD'] > 0, 'Ticker'].tolist()
         # Filtrar tickers que YF no puede resolver:
         # - Bonos argentinos (GD, AL, AE, BP prefijos + números)
         # - FCIs (BCMMUSDA y similares largos)
@@ -459,16 +562,26 @@ with st.sidebar:
 
         if tickers_yf:
             with st.spinner(f"Descargando {len(tickers_yf)} tickers de Yahoo Finance..."):
-                st.session_state.hist_data = fetch_data(tickers_yf, PERIOD)
-                st.session_state.tickers_loaded = tickers_yf
-            st.success(f"✅ Datos cargados — {len(tickers_yf)} tickers")
+                _precios, _bench, _notas = fetch_data(tickers_yf, PERIOD)
+            st.session_state.data_notas = _notas
+            if _precios is None:
+                st.session_state.hist_data = None
+                st.session_state.bench_data = None
+                st.error(" ".join(_notas))
+            else:
+                st.session_state.hist_data = _precios
+                st.session_state.bench_data = _bench
+                st.session_state.tickers_loaded = list(_precios.columns)
+                st.success(f"✅ Datos cargados — {_precios.shape[1]} tickers (en USD, calendario EEUU)")
+                for _n in _notas:
+                    st.info(_n)
             if excluidos:
                 st.info(f"ℹ️ Excluidos del análisis histórico (no disponibles en YF): {', '.join(excluidos)}")
         else:
             st.warning("Primero cargá tu cartera")
 
     st.markdown("---")
-    st.caption("📊 Optimizador de Cartera v4.0\nDatos: Yahoo Finance")
+    st.caption("📊 Optimizador de Cartera v4.1\nDatos: Yahoo Finance")
 
 # ─────────────────────────────────────────
 #  HEADER
@@ -874,11 +987,12 @@ with tabs[1]:
                                 TICKERS_ARS = {'METR.BA', 'TGNO4.BA'}
 
                                 if instrumento == 'Acciones ARG':
-                                    ticker_yf = TICKER_MAP.get(ticker_orig, ticker_orig)
+                                    # Con ADR → ADR en USD; sin ADR → panel BYMA (.BA), se convierte con CCL
+                                    ticker_yf = TICKER_MAP_YF.get(ticker_orig, f"{ticker_orig}.BA")
                                 elif instrumento == 'Bitcoin':
                                     ticker_yf = 'BTC-USD'  # YF ticker para Bitcoin
                                 else:
-                                    ticker_yf = ticker_orig  # Cedears ya están en YF en USD
+                                    ticker_yf = yf_ticker(ticker_orig)  # CEDEAR → subyacente en USD
 
                                 monto_usd  = round(irow['V_Actual_Pesos'] / tc_input, 2)
                                 target_pct = round(irow['V_Actual_Pesos'] / total_rv_pesos * 100, 2) if total_rv_pesos > 0 else 0
@@ -1671,8 +1785,8 @@ with tabs[7]:
         if len(available) < 2:
             st.warning("Se necesitan al menos 2 tickers con datos disponibles")
         else:
-            prices_clean = prices[available].ffill().bfill()
-            prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+            prices_clean, _info = preparar_precios(prices, available)
+            mostrar_aviso_ventana(_info)
             available = list(prices_clean.columns)
             returns = prices_clean.pct_change().dropna()
             corr = returns.corr().round(3)
@@ -1748,48 +1862,80 @@ with tabs[8]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
-        prices_clean = prices[available].ffill().bfill()
-        prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+        prices_clean, _info = preparar_precios(prices, available)
+        mostrar_aviso_ventana(_info)
         available = list(prices_clean.columns)
-        # Drop tickers with fewer than 30 data points
-        valid_tickers = [t for t in available if prices_clean[t].notna().sum() >= 30]
-        dropped = [t for t in available if t not in valid_tickers]
-        if dropped:
-            st.warning(f"⚠️ Sin datos suficientes (excluidos del cálculo): {', '.join(dropped)}")
-        available = valid_tickers
         if not available:
             st.error("❌ Ningún ticker tiene datos suficientes. Probá aumentar los años de historia en el panel lateral.")
             st.stop()
-        prices_clean = prices_clean[available]
+        bench = st.session_state.get('bench_data')
 
         with st.spinner("Calculando métricas..."):
             try:
-                metrics, returns = calc_metrics(prices_clean, rf=rf_rate)
+                # Métricas individuales: cada activo con su historia completa
+                metrics, _ = calc_metrics(prices[available].ffill(limit=5), bench, rf=rf_rate, beta_freq=beta_freq)
             except Exception as e:
                 st.error(f"❌ No se pudieron calcular las métricas: {e}\n\nAsegurate de que los tickers tengan datos suficientes y de haber hecho click en **Cargar datos de mercado**.")
                 st.stop()
 
-        # Portfolio-level — renormalizar pesos a los tickers disponibles
-        weights_actual = np.array([float(df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]) if len(df_port[df_port['Ticker']==t]) > 0 else 0.0 for t in available])
-        _w_sum = weights_actual.sum()
-        weights_actual = (weights_actual / _w_sum) if _w_sum > 0 else np.ones(len(available)) / len(available)
-        if len(weights_actual) == len(available):
-            port_ret, port_vol, port_sharpe = portfolio_metrics(weights_actual, returns, rf_rate)
-            port_var1d = (-np.dot(weights_actual, returns.quantile(0.05))) * 100
-            beta_values = metrics['Beta SPY'].dropna()
-            port_beta = float(np.dot(
-                [w for t,w in zip(available, weights_actual) if t in metrics.index and not np.isnan(metrics.loc[t,'Beta SPY'])],
-                beta_values.reindex([t for t in available if t in beta_values.index]).dropna().values
-            )) if len(beta_values) > 0 else np.nan
+        # ── Métricas de la cartera (ventana común, pesos actuales) ──
+        returns = prices_clean.pct_change().dropna()
+        weights_actual = pesos_para(df_port, available)
+        port_ret, port_vol, port_sharpe = portfolio_metrics(weights_actual, returns, rf_rate)
+        port_serie = serie_cartera(prices_clean, weights_actual)
+        port_r = port_serie.pct_change().dropna()
+        port_var1d = -port_r.quantile(0.05) * 100          # VaR histórico real de la cartera (incluye diversificación)
+        port_beta = calc_beta(port_serie, bench, beta_freq) if bench is not None else np.nan
+        port_mdd = (port_serie / port_serie.cummax() - 1).min() * 100
+        _down = np.sqrt((np.minimum(port_r, 0) ** 2).mean()) * np.sqrt(252)
+        port_sortino = (port_ret - rf_rate) / _down if _down > 0 else np.nan
 
-            m1,m2,m3,m4,m5,m6 = st.columns(6)
-            m1.metric("Retorno Anual", f"{port_ret*100:.1f}%")
-            m2.metric("Volatilidad", f"{port_vol*100:.1f}%")
-            m3.metric("Sharpe", f"{port_sharpe:.2f}")
-            m4.metric("Beta vs SPY", f"{port_beta:.2f}" if not np.isnan(port_beta) else "—")
-            m5.metric("VaR 1d 95%", f"{port_var1d:.2f}%")
-            m6.metric("VaR 10d 95%", f"{port_var1d*np.sqrt(10):.2f}%")
-            st.session_state['port_stats'] = {'ret':port_ret,'vol':port_vol,'sharpe':port_sharpe,'beta':port_beta if not np.isnan(port_beta) else 1.0}
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Retorno Anual", f"{port_ret*100:.1f}%")
+        m2.metric("Volatilidad", f"{port_vol*100:.1f}%")
+        m3.metric("Sharpe", f"{port_sharpe:.2f}")
+        m4.metric("Sortino", f"{port_sortino:.2f}" if not np.isnan(port_sortino) else "—")
+        m5, m6, m7, m8 = st.columns(4)
+        m5.metric(f"Beta vs SPY ({beta_freq.lower()})", f"{port_beta:.2f}" if not np.isnan(port_beta) else "—")
+        m6.metric("Máx Drawdown", f"{port_mdd:.1f}%")
+        m7.metric("VaR 1d 95%", f"{port_var1d:.2f}%")
+        m8.metric("VaR 10d 95%", f"{port_var1d*np.sqrt(10):.2f}%")
+        st.session_state['port_stats'] = {'ret': port_ret, 'vol': port_vol, 'sharpe': port_sharpe,
+                                          'beta': port_beta if not np.isnan(port_beta) else 1.0}
+
+        # ── Contribución al riesgo ──
+        st.markdown("#### Contribución al riesgo de la cartera")
+        st.caption("Qué parte de la volatilidad total aporta cada activo. Un activo puede pesar poco y aportar mucho riesgo (o al revés) según su volatilidad y su correlación con el resto.")
+        _cov = returns.cov().values * 252
+        _w = weights_actual
+        _var_p = float(_w @ _cov @ _w)
+        if _var_p > 0:
+            _rc = _w * (_cov @ _w) / _var_p * 100
+            df_rc = pd.DataFrame({'Ticker': available, 'Peso %': _w * 100, 'Aporte al riesgo %': _rc})
+            df_rc['Riesgo / Peso'] = np.where(df_rc['Peso %'] > 0, df_rc['Aporte al riesgo %'] / df_rc['Peso %'], np.nan)
+            df_rc = df_rc.sort_values('Aporte al riesgo %', ascending=False).round(2)
+            c_rc1, c_rc2 = st.columns([3, 2])
+            with c_rc1:
+                _top = df_rc.head(20).iloc[::-1]
+                fig_rc = go.Figure()
+                fig_rc.add_trace(go.Bar(y=_top['Ticker'], x=_top['Peso %'], name='Peso %', orientation='h',
+                                        marker_color='rgba(0,212,255,0.7)'))
+                fig_rc.add_trace(go.Bar(y=_top['Ticker'], x=_top['Aporte al riesgo %'], name='Aporte al riesgo %',
+                                        orientation='h', marker_color='rgba(248,113,113,0.8)'))
+                fig_rc.update_layout(barmode='group', height=max(350, 22 * len(_top)),
+                    title='Peso vs aporte al riesgo (top 20)',
+                    paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0',
+                    title_font_color='#00d4ff', title_font_size=14,
+                    legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
+                st.plotly_chart(fig_rc, use_container_width=True)
+            with c_rc2:
+                st.dataframe(df_rc, use_container_width=True, hide_index=True,
+                    column_config={
+                        'Peso %': st.column_config.NumberColumn(format="%.2f%%"),
+                        'Aporte al riesgo %': st.column_config.NumberColumn(format="%.2f%%"),
+                        'Riesgo / Peso': st.column_config.NumberColumn(format="%.2fx",
+                            help=">1: aporta más riesgo que su peso. <1: diversifica."),
+                    })
 
         # Table
         st.markdown("#### Métricas por activo")
@@ -1833,7 +1979,11 @@ with tabs[8]:
 - **Sharpe**: Retorno ajustado por riesgo. >1 es bueno, >2 es excelente. Menor a 0.5 indica que el riesgo no se está compensando.
 - **CAGR %**: Tasa de crecimiento anual compuesta — el retorno real si hubieras mantenido el activo todo el período.
 - **Beta SPY**: Sensibilidad al mercado. Beta=1 se mueve igual que el mercado. Beta>1 amplifica movimientos. Beta<1 es más defensivo.
-- **VaR 1d 95%**: Pérdida máxima esperada en un día normal (95% de confianza). Ejemplo: VaR=2% significa que solo hay 5% de chances de perder más de 2% en un día.
+- **VaR 1d 95%**: Pérdida máxima esperada en un día normal (95% de confianza). Ejemplo: VaR=2% significa que solo hay 5% de chances de perder más de 2% en un día. El de la cartera se calcula sobre su serie real, así que ya incluye el efecto de la diversificación.
+- **Sortino**: Como el Sharpe, pero solo penaliza la volatilidad a la baja. Más útil cuando un activo tiene subas fuertes que inflan su volatilidad.
+- **Máx Drawdown %**: La peor caída desde un máximo hasta un mínimo en el período. Es lo que realmente se siente en el bolsillo.
+- **Historia desde**: Cada activo se mide con toda su historia disponible dentro de los años elegidos. La cartera, en cambio, se mide en la ventana común a todos.
+- **Beta**: Todos los activos (CEDEARs, ADRs argentinos, acciones locales convertidas a USD con CCL y Bitcoin) se miden igual: retornos en USD contra SPY, mismas fechas. Por eso son comparables entre sí.
             """)
 
 
@@ -1850,8 +2000,8 @@ with tabs[9]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
-        prices_clean = prices[available].ffill().bfill()
-        prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+        prices_clean, _info = preparar_precios(prices, available)
+        mostrar_aviso_ventana(_info)
         available = list(prices_clean.columns)
 
         weights_actual = np.array([float(df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]) if len(df_port[df_port['Ticker']==t]) > 0 else 0.0 for t in available])
@@ -1859,7 +2009,7 @@ with tabs[9]:
         weights_actual = (weights_actual / _w2_sum) if _w2_sum > 0 else np.ones(len(available)) / len(available)
 
         # Portfolio combined price
-        port_prices = (prices_clean * weights_actual).sum(axis=1)
+        port_prices = serie_cartera(prices_clean, weights_actual)
         port_cum = (port_prices / port_prices.iloc[0] - 1) * 100
 
         # Download benchmarks
@@ -1945,8 +2095,8 @@ with tabs[10]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
-        prices_clean = prices[available].ffill().bfill()
-        prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+        prices_clean, _info = preparar_precios(prices, available)
+        mostrar_aviso_ventana(_info)
         available = list(prices_clean.columns)
         returns_all = prices_clean.pct_change().dropna()
 
@@ -2095,10 +2245,9 @@ with tabs[11]:
             df_p = calc_portfolio_weights(st.session_state.portfolio.copy())
             available = [t for t in (st.session_state.tickers_loaded or df_p['Ticker'].tolist()) if t in prices.columns]
             if available:
-                w = np.array([float(df_p[df_p['Ticker']==t]['Peso_Actual_%'].values[0]) if len(df_p[df_p['Ticker']==t]) > 0 else 0.0 for t in available])
-                _w5_sum = w.sum()
-                w = (w / _w5_sum) if _w5_sum > 0 else np.ones(len(available)) / len(available)
-                port_prices = (prices[available] * w).sum(axis=1)
+                _pp, _ = preparar_precios(prices, available)
+                w = pesos_para(df_p, list(_pp.columns))
+                port_prices = serie_cartera(_pp, w)
                 port_prices = port_prices / port_prices.iloc[0] * 100
                 rolling_max = port_prices.cummax()
                 drawdown = (port_prices - rolling_max) / rolling_max * 100
@@ -2139,9 +2288,8 @@ with tabs[12]:
         if len(available) < 2:
             st.warning("Se necesitan al menos 2 activos con datos.")
         else:
-            prices_clean = prices[available].ffill().bfill()
-            # Drop columns with too many NaN (e.g. tickers with short history)
-            prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+            prices_clean, _info = preparar_precios(prices, available)
+            mostrar_aviso_ventana(_info)
             returns_fe = prices_clean.pct_change().dropna()
             available = list(prices_clean.columns)  # update available after cleaning
             min_w = st.session_state.get('min_weight', 0.0)
@@ -2257,8 +2405,8 @@ with tabs[13]:
         prices = st.session_state.hist_data
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
-        prices_clean = prices[available].ffill().bfill()
-        prices_clean = prices_clean.dropna(axis=1, thresh=max(30, len(prices_clean)//2))
+        prices_clean, _info = preparar_precios(prices, available)
+        mostrar_aviso_ventana(_info)
         available = list(prices_clean.columns)
         returns = prices_clean.pct_change().dropna()
 

@@ -147,7 +147,7 @@ def sync_instrument(ticker, sector=""):
 COLORS = px.colors.qualitative.Set2
 
 def fmt_usd(v):
-    return f"${v:,.0f}"
+    return f"u$s {v:,.0f}"
 
 def fmt_pct(v):
     return f"{v:.2f}%"
@@ -520,6 +520,143 @@ def monte_carlo(port_ret, port_vol, total_usd, n_sims=500, n_days=252):
 # ─────────────────────────────────────────
 #  SIDEBAR
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────
+#  EXPORTAR RESUMEN (Excel)
+# ─────────────────────────────────────────
+def _ret_freq(precios, freq):
+    p = precios.resample('W-FRI').last() if str(freq).startswith('Semanal') else precios
+    return p.pct_change().dropna(how='all')
+
+def generar_resumen_excel(years, rf, beta_freq):
+    """Arma un Excel con todo lo calculado, para revisar o compartir."""
+    import io
+    hist = st.session_state.hist_data
+    bench = st.session_state.bench_data
+    df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
+    tickers = [t for t in df_port['Ticker'] if t in hist.columns]
+    hoy = pd.Timestamp.today()
+
+    # ── Métricas con historia completa de cada activo ──
+    met_full, _ = calc_metrics(hist[tickers].ffill(limit=5), bench, rf=rf, beta_freq=beta_freq)
+
+    # ── Ventana común (lo que usa la cartera) ──
+    pc, info = preparar_precios(hist, tickers)
+    en_ventana = list(pc.columns)
+    w = pesos_para(df_port, en_ventana)
+    serie = serie_cartera(pc, w)
+    r_d = serie.pct_change().dropna()
+    ret_p, vol_p, sh_p = portfolio_metrics(w, pc.pct_change().dropna(), rf)
+    beta_reg = calc_beta(serie, bench, beta_freq)
+    mdd = (serie / serie.cummax() - 1).min()
+
+    # retornos a la frecuencia de la beta, para correlación y volatilidad comparables
+    r_f = _ret_freq(pd.concat([pc, bench.rename('__SPY__')], axis=1).loc[pc.index[0]:].dropna(subset=['__SPY__']), beta_freq)
+    per_anio = 52 if str(beta_freq).startswith('Semanal') else 252
+    spy_vol = r_f['__SPY__'].std() * np.sqrt(per_anio)
+
+    cov = pc.pct_change().dropna().cov().values * 252
+    var_p = float(w @ cov @ w)
+    rc = (w * (cov @ w) / var_p * 100) if var_p > 0 else np.full(len(w), np.nan)
+
+    filas = []
+    sector = df_port.set_index('Ticker')['Sector'].to_dict()
+    monto = df_port.groupby('Ticker')['Monto_USD'].sum().to_dict()
+    peso_rv = df_port.groupby('Ticker')['Peso_Actual_%'].sum().to_dict()
+    for t in df_port['Ticker'].unique():
+        fila = {'Ticker': t, 'Sector': sector.get(t, ''), 'Monto u$s': round(monto.get(t, 0), 2),
+                'Peso en RV %': round(peso_rv.get(t, 0), 2)}
+        if t in met_full.index:
+            m = met_full.loc[t]
+            fila.update({'Historia desde': m['Historia desde'],
+                         'Beta (historia completa)': m['Beta SPY'],
+                         'Volatilidad % (hist. completa)': m['Volatilidad %'],
+                         'Retorno anual % (hist. completa)': m['Retorno Anual %'],
+                         'Sharpe (hist. completa)': m['Sharpe'],
+                         'Máx Drawdown %': m['Máx Drawdown %']})
+        if t in en_ventana:
+            i = en_ventana.index(t)
+            b = calc_beta(pc[t], bench, beta_freq)
+            corr = r_f[t].corr(r_f['__SPY__']) if t in r_f else np.nan
+            vol_v = r_f[t].std() * np.sqrt(per_anio) if t in r_f else np.nan
+            fila.update({'En análisis de cartera': 'Sí',
+                         'Peso en análisis %': round(w[i] * 100, 2),
+                         'Beta (ventana común)': round(b, 3),
+                         'Correlación con SPY': round(corr, 3),
+                         'Volatilidad % (ventana común)': round(vol_v * 100, 2),
+                         'Aporte a la beta': round(w[i] * b, 4) if not np.isnan(b) else np.nan,
+                         'Aporte al riesgo %': round(rc[i], 2)})
+        else:
+            motivo = 'Sin datos en Yahoo' if t not in hist.columns else 'Historia corta'
+            fila.update({'En análisis de cartera': f'No ({motivo})'})
+        filas.append(fila)
+    df_act = pd.DataFrame(filas).sort_values('Monto u$s', ascending=False)
+
+    beta_pond = df_act['Aporte a la beta'].sum(min_count=1) if 'Aporte a la beta' in df_act else np.nan
+    fuera = df_act[df_act['En análisis de cartera'] != 'Sí']
+    resumen = [
+        ('Fecha del resumen', hoy.strftime('%d/%m/%Y %H:%M')),
+        ('— CONFIGURACIÓN —', ''),
+        ('Años de historia', years),
+        ('Tasa libre de riesgo %', rf * 100),
+        ('Frecuencia de la beta', beta_freq),
+        ('Historia mínima para análisis de cartera (años)', st.session_state.get('min_hist_anios', 0)),
+        ('Benchmark', 'SPY'),
+        ('Tipo de cambio usado', f"{st.session_state.get('balanz_tc_fuente', '')} ${st.session_state.get('balanz_tipo_cambio', 0):,.2f}"),
+        ('— RENTA VARIABLE —', ''),
+        ('Total renta variable u$s', round(df_port['Monto_USD'].sum(), 2)),
+        ('Activos en renta variable', df_port['Ticker'].nunique()),
+        ('Activos en análisis de cartera', len(en_ventana)),
+        ('Peso fuera del análisis %', round(fuera['Peso en RV %'].sum(), 2)),
+        ('Fuera del análisis', ', '.join(fuera['Ticker'])),
+        ('Ventana común desde', info['inicio'].strftime('%d/%m/%Y') if info.get('inicio') is not None else ''),
+        ('— CARTERA (ventana común, pesos actuales) —', ''),
+        ('Retorno anual %', round(ret_p * 100, 2)),
+        ('Volatilidad anual %', round(vol_p * 100, 2)),
+        ('Sharpe', round(sh_p, 3)),
+        ('Máx Drawdown %', round(mdd * 100, 2)),
+        ('VaR 1d 95% (histórico) %', round(-r_d.quantile(0.05) * 100, 2)),
+        ('Beta por regresión (serie de la cartera vs SPY)', round(beta_reg, 3)),
+        ('Beta ponderada (suma de peso × beta de cada activo)', round(beta_pond, 3) if pd.notna(beta_pond) else ''),
+        ('Volatilidad SPY en la ventana %', round(spy_vol * 100, 2)),
+    ]
+    df_res = pd.DataFrame(resumen, columns=['Concepto', 'Valor'])
+
+    # ── Cartera total (lo importado de Balanz) ──
+    hojas_total = {}
+    bz = st.session_state.get('balanz_data')
+    if bz is not None and len(bz):
+        tc = float(st.session_state.get('balanz_tipo_cambio', 1) or 1)
+        bz = bz.copy()
+        bz['u$s'] = np.where(bz['Es_USD_Real'], bz['V_Actual_Num'], bz['V_Actual_Num'] / tc).round(2)
+        bz['Leído en'] = np.where(bz['Es_USD_Real'], 'USD', 'ARS')
+        tot = bz['u$s'].sum()
+        bz['% cartera total'] = (bz['u$s'] / tot * 100).round(2)
+        hojas_total['Cartera total'] = bz[['Ticker', 'Descripcion', 'Instrumento', 'Renta', 'Moneda', 'Pais',
+                                           'Sector_Macro', 'Leído en', 'V_Actual_Num', 'u$s', '% cartera total']]
+        agr = []
+        for col in ['Renta', 'Moneda', 'Instrumento', 'Pais', 'Sector_Macro']:
+            g = bz.groupby(col)['u$s'].sum().sort_values(ascending=False)
+            for k, v in g.items():
+                agr.append({'Agrupación': col, 'Grupo': k, 'u$s': round(v, 2), '%': round(v / tot * 100, 2)})
+        hojas_total['Agrupaciones'] = pd.DataFrame(agr)
+
+    # precios semanales en USD, para poder verificar cálculos
+    px_sem = pd.concat([hist[tickers], bench.rename('SPY (benchmark)')], axis=1).resample('W-FRI').last()
+    px_sem.index = px_sem.index.strftime('%Y-%m-%d')
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine='openpyxl') as xw:
+        df_res.to_excel(xw, sheet_name='Resumen', index=False)
+        df_act.to_excel(xw, sheet_name='Renta variable', index=False)
+        for nombre, d in hojas_total.items():
+            d.to_excel(xw, sheet_name=nombre, index=False)
+        px_sem.to_excel(xw, sheet_name='Precios semanales USD')
+        for ws in xw.book.worksheets:
+            for col in ws.columns:
+                largo = max(len(str(c.value)) if c.value is not None else 0 for c in col[:200])
+                ws.column_dimensions[col[0].column_letter].width = min(max(10, largo + 2), 55)
+    return buf.getvalue()
+
 with st.sidebar:
     st.markdown("## ⚙️ Configuración")
 
@@ -635,6 +772,24 @@ with st.sidebar:
                 st.info(f"ℹ️ Excluidos del análisis histórico (no disponibles en YF): {', '.join(excluidos)}")
         else:
             st.warning("Primero cargá tu cartera")
+
+    if st.session_state.get('hist_data') is not None:
+        st.markdown("---")
+        st.markdown("### 📤 Exportar resumen")
+        if st.button("Preparar resumen", use_container_width=True,
+                     help="Genera un Excel con la configuración, las métricas de la cartera, cada activo "
+                          "(beta, correlación, aporte al riesgo), la cartera total y los precios usados."):
+            with st.spinner("Armando el resumen..."):
+                try:
+                    st.session_state.resumen_xlsx = generar_resumen_excel(years, rf_rate, beta_freq)
+                except Exception as e:
+                    st.session_state.resumen_xlsx = None
+                    st.error(f"No se pudo armar el resumen: {e}")
+        if st.session_state.get('resumen_xlsx'):
+            st.download_button("⬇️ Descargar resumen (Excel)", data=st.session_state.resumen_xlsx,
+                file_name=f"resumen_cartera_{pd.Timestamp.today():%Y-%m-%d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
 
     st.markdown("---")
     st.caption("📊 Optimizador de Cartera v4.1\nDatos: Yahoo Finance")
@@ -1363,7 +1518,9 @@ with tabs[3]:
 
         # Metrics row
         m1,m2,m3,m4,m5 = st.columns(5)
-        m1.metric("Total cartera", fmt_usd(total))
+        m1.metric("Total Renta Variable", fmt_usd(total),
+                  help="Esta solapa trabaja solo con la renta variable (acciones, CEDEARs, BTC). "
+                       "La cartera total con liquidez y renta fija se ve en el Tablero Macro.")
         m2.metric("Activos", len(df))
         m3.metric("Total Target %", f"{total_target:.2f}%",
                   delta=f"{total_target-100:.2f}% vs 100%" if abs(total_target-100)>0.1 else "✓ OK")
@@ -1614,7 +1771,7 @@ with tabs[5]:
         total = df['Total'].iloc[0]
 
         m1,m2,m3,m4,m5 = st.columns(5)
-        m1.metric("Total", fmt_usd(total))
+        m1.metric("Total Renta Variable", fmt_usd(total))
         m2.metric("Activos", len(df))
         m3.metric("A comprar", len(df[df['Desvio_%']<-0.5]), delta="subweight")
         m4.metric("A vender", len(df[df['Desvio_%']>0.5]), delta="overweight")

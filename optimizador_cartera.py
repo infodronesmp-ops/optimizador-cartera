@@ -153,6 +153,62 @@ def fmt_pct(v):
     return f"{v:.2f}%"
 
 # ─────────────────────────────────────────
+#  TIPO DE CAMBIO (fuente objetiva)
+# ─────────────────────────────────────────
+TC_FUENTES = {
+    "MEP (automático)": ("bolsa", "Dólar MEP"),
+    "CCL (automático)": ("contadoconliqui", "Dólar CCL"),
+}
+
+@st.cache_data(ttl=900, show_spinner=False)
+def obtener_tc(casa):
+    """Cotización de dolarapi.com (agrega datos de mercado). Devuelve dict o None."""
+    import requests
+    try:
+        r = requests.get(f"https://dolarapi.com/v1/dolares/{casa}", timeout=8)
+        r.raise_for_status()
+        d = r.json()
+        venta = float(d.get('venta') or 0)
+        if venta <= 0:
+            return None
+        fecha = pd.to_datetime(d.get('fechaActualizacion'), utc=True, errors='coerce')
+        if pd.notna(fecha):
+            fecha = fecha.tz_convert('America/Argentina/Buenos_Aires')
+        return {'venta': venta, 'compra': float(d.get('compra') or 0), 'fecha': fecha}
+    except Exception:
+        return None
+
+import re as _re
+_RE_USD = _re.compile(r'(u\s*\$\s*[sd]?|us\s*\$|usd)', _re.I)
+
+# Tipos de instrumento cuyo V. Actual se carga EN PESOS (todo lo demás se toma en DÓLARES)
+
+
+def leer_valor(raw):
+    """Lee un V. Actual. Devuelve (numero, moneda_del_texto) donde moneda_del_texto es
+    'USD' (trae u$s/usd), 'ARS' (trae $ solo) o None (número sin símbolo). (None, None) si no se puede leer."""
+    if raw is None:
+        return None, None
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return (None, None) if pd.isna(raw) else (float(raw), None)
+    s = str(raw).strip()
+    if not s or s in ('-', '#N/A', 'None', 'nan'):
+        return None, None
+    if _RE_USD.search(s):
+        moneda = 'USD'
+    elif '$' in s:
+        moneda = 'ARS'
+    else:
+        moneda = None
+    num = _re.sub(r'[^0-9,.\-]', '', s)          # saca letras, símbolos y espacios
+    if not num or num in ('-', '.', ','):
+        return None, None
+    try:
+        return float(num.replace('.', '').replace(',', '.')), moneda
+    except ValueError:
+        return None, None
+
+# ─────────────────────────────────────────
 #  CAPA DE DATOS
 # ─────────────────────────────────────────
 # Ticker de Balanz / local → ticker de Yahoo Finance.
@@ -793,12 +849,27 @@ with tabs[1]:
             key="balanz_uploader"
         )
     with col_tc:
-        tc_input = st.number_input(
-            "Tipo de cambio ($ por u$s)",
-            min_value=1.0, value=float(st.session_state.balanz_tipo_cambio),
-            step=10.0, help="Se usa para convertir a pesos los instrumentos marcados como 'en dólares'"
-        )
-        st.session_state.balanz_tipo_cambio = tc_input
+        tc_tipo = st.selectbox("Tipo de cambio", list(TC_FUENTES.keys()) + ["Manual"], key="tc_tipo",
+            help="Se usa para pasar a pesos los instrumentos valuados en dólares y para expresar la cartera en USD. "
+                 "MEP es el dólar que obtenés operando en tu cuenta de Balanz. Se toma el valor de VENTA.")
+        tc_input = None
+        if tc_tipo != "Manual":
+            _casa, _nombre = TC_FUENTES[tc_tipo]
+            _tc = obtener_tc(_casa)
+            if _tc:
+                tc_input = _tc['venta']
+                _f = f"{_tc['fecha']:%d/%m/%Y %H:%M}" if pd.notna(_tc['fecha']) else "s/d"
+                st.metric(f"{_nombre} (venta)", f"${tc_input:,.2f}")
+                st.caption(f"Fuente: dolarapi.com · actualizado {_f}")
+            else:
+                st.warning("No se pudo obtener la cotización automática. Ingresala a mano.")
+        if tc_input is None:
+            tc_input = st.number_input(
+                "Tipo de cambio manual ($ por u$s)",
+                min_value=1.0, value=float(st.session_state.balanz_tipo_cambio),
+                step=1.0, help="Usalo si querés valuar con el TC de una fecha puntual (ej: la del Excel).")
+        st.session_state.balanz_tipo_cambio = float(tc_input)
+        st.session_state.balanz_tc_fuente = tc_tipo
 
     if uploaded_balanz:
         try:
@@ -837,6 +908,7 @@ with tabs[1]:
                         elif 'target' in hl and 'sector' in hl: col_map['Target_Sector'] = i  # ANTES que sector macro
                         elif 'v. actual' in hl or 'v.actual' in hl or ('actual' in hl and 'valor' not in hl): col_map['V_Actual'] = i
                         elif 'descripci' in hl: col_map['Descripcion'] = i
+                        elif hl == 'instrumento': col_map['Instrumento'] = i
                         elif 'moneda' in hl: col_map['Moneda'] = i
                         elif 'sector macro' in hl or 'sector_macro' in hl or ('sector' in hl and 'macro' in hl): col_map['Sector_Macro'] = i
                         elif 'sector' in hl and 'macro' not in hl and 'target' not in hl: col_map['Sector_Detalle'] = i
@@ -852,30 +924,54 @@ with tabs[1]:
 
                     st.info(f"📋 Solapa encontrada: **{sheet_name}** | Columnas mapeadas: {list(col_map.keys())}")
 
+                    # ── Qué tipos de instrumento vienen en PESOS (todo lo demás: DÓLARES) ──
+                    _idx_inst = col_map.get('Instrumento', 16)
+                    tipos_archivo = sorted({str(r[_idx_inst]).strip() for r in rows[header_row+1:]
+                                            if r and len(r) > _idx_inst and r[_idx_inst] not in (None, '')
+                                            and str(r[_idx_inst]).strip() not in ('#N/A', 'None', 'nan')})
+                    # Por defecto: todo tipo que diga "banco" va en pesos
+                    if 'tipos_en_pesos' in st.session_state:
+                        _default_pesos = [t for t in st.session_state.tipos_en_pesos if t in tipos_archivo]
+                    else:
+                        _default_pesos = [t for t in tipos_archivo if 'banco' in t.lower()]
+                    tipos_en_pesos = st.multiselect(
+                        "💱 Tipos de instrumento cargados en PESOS (todo lo demás se toma en dólares)",
+                        options=tipos_archivo,
+                        default=_default_pesos,
+                        help="Por defecto todos los montos están en dólares. Elegí acá solo los tipos que cargás "
+                             "en pesos (ej: FCI Bancos, Liquidez Bancos). Los tipos salen de la columna "
+                             "'Instrumento' de tu Excel.")
+                    st.session_state.tipos_en_pesos = tipos_en_pesos
+
                     # Parse data rows
                     data_rows = []
+                    filas_ilegibles = []
                     for row in rows[header_row+1:]:
                         if not row or not any(v is not None for v in row):
                             continue
                         ticker = str(row[col_map.get('Ticker', 0)] or '').strip()
                         if not ticker or ticker in ['#N/A','None','nan','']:
                             continue
+                        # Filas de títulos/totales que vienen al pegar desde Balanz
+                        if ticker.lower() in ('total', 'totales', 'pesos', 'dolares', 'dólares', 'ticker'):
+                            continue
 
                         # V.Actual: detectar si viene como texto "u$s XXXX" (en dólares reales)
                         # o como número (ya en pesos, Balanz lo convirtió)
                         v_actual_raw = row[col_map.get('V_Actual', 8)]
                         v_actual_str = str(v_actual_raw).strip()
-                        es_usd_real  = 'u$s' in v_actual_str.lower() or 'u$' in v_actual_str.lower()
-
-                        try:
-                            v_actual_num = float(
-                                v_actual_str
-                                .replace('u$s','').replace('u$','').replace('$','')
-                                .replace('.','').replace(',','.')   # "44.598" → "44598" → float
-                                .strip()
-                            )
-                        except:
+                        v_actual_num, moneda_texto = leer_valor(v_actual_raw)
+                        if v_actual_num is None:
+                            if v_actual_str not in ('', 'None', '-', 'nan', '#N/A'):
+                                filas_ilegibles.append(f"{ticker} ('{v_actual_str}')")
                             continue
+                        tipo_inst = str(row[_idx_inst] or '').strip() if len(row) > _idx_inst else ''
+                        # Regla: por defecto DÓLARES. Pesos si el tipo está marcado como "en pesos".
+                        # Si el valor trae explícito u$s o $, manda eso.
+                        if moneda_texto:
+                            es_usd_real = (moneda_texto == 'USD')
+                        else:
+                            es_usd_real = tipo_inst not in tipos_en_pesos
                         if v_actual_num <= 0:
                             continue
 
@@ -898,10 +994,13 @@ with tabs[1]:
                             'Sector_Detalle': str(row[col_map.get('Sector_Detalle',24)] or '').strip(),
                             'Renta':          str(row[col_map.get('Renta',18)] or '').strip(),
                             'Pais':           str(row[col_map.get('Pais',23)] or '').strip(),
-                            'Instrumento':    str(row[16] or '').strip(),
+                            'Instrumento':    tipo_inst,
                             'Target_Sector':  target_sector_val,  # % como decimal (0.15 = 15%)
                         })
 
+                    if filas_ilegibles:
+                        st.error("❌ No pude leer el valor de estos instrumentos, **no se están contando**. "
+                                 "Revisá cómo están escritos en la columna V. Actual: " + ", ".join(filas_ilegibles))
                     if not data_rows:
                         st.error("No se encontraron datos válidos en la solapa")
                     else:
@@ -920,13 +1019,26 @@ with tabs[1]:
                         usd_reales = df_balanz[df_balanz['Es_USD_Real']]['Ticker'].tolist()
                         total = df_balanz['V_Actual_Pesos'].sum()
 
-                        st.success(f"✅ {len(df_balanz)} instrumentos leídos — Total: **${total:,.0f}**")
+                        total_usd = total / tc_input
+                        # Control de cordura: un valor leído en dólares demasiado grande probablemente esté en pesos
+                        _sospechosos = df_balanz[df_balanz['Es_USD_Real'] & (df_balanz['V_Actual_Num'] > 1_000_000)]
+                        if not _sospechosos.empty:
+                            st.error("🚨 Estos valores se leyeron en **dólares** pero superan u$s 1.000.000 cada uno. "
+                                     "¿No estarán en pesos? Revisá si pegaste la vista en pesos de Balanz o si el tipo "
+                                     "debería estar marcado como 'en pesos': "
+                                     + ", ".join(f"{r.Ticker} ({r.V_Actual_Num:,.0f})" for r in _sospechosos.itertuples()))
+                        st.success(f"✅ {len(df_balanz)} instrumentos leídos — Total: **${total:,.0f}** "
+                                   f"≈ **u$s {total_usd:,.0f}**")
                         if usd_reales:
-                            st.info(f"💵 Instrumentos con V.Actual en dólares (se aplicó TC ${tc_input:,.0f}): **{', '.join(usd_reales)}**")
+                            st.info(f"💵 Instrumentos valuados en dólares (convertidos con {st.session_state.get('balanz_tc_fuente','TC')}: ${tc_input:,.2f}): **{', '.join(usd_reales)}**")
 
                         # Preview table
-                        df_prev = df_balanz[['Ticker','Descripcion','Instrumento','Moneda','Es_USD_Real','V_Actual_Num','V_Actual_Pesos']].copy()
-                        df_prev.columns = ['Ticker','Descripción','Tipo','Moneda','V.Actual en USD?','V.Actual original','V.Actual en Pesos']
+                        df_prev = df_balanz[['Ticker','Descripcion','Instrumento','Es_USD_Real','V_Actual_Num','V_Actual_Pesos']].copy()
+                        df_prev['Es_USD_Real'] = df_prev['Es_USD_Real'].map({True: 'USD', False: 'ARS'})
+                        df_prev['V.Actual en USD'] = (df_prev['V_Actual_Pesos'] / tc_input).round(0)
+                        df_prev.columns = ['Ticker','Descripción','Tipo','Leído en','Valor leído','V.Actual en Pesos','V.Actual en USD']
+                        st.caption("**Leído en** muestra en qué moneda interpretó la app cada valor: por defecto dólares; "
+                                   "pesos solo para los tipos elegidos arriba.")
                         st.dataframe(df_prev, use_container_width=True, hide_index=True)
 
                         st.markdown("---")
@@ -1010,7 +1122,13 @@ with tabs[1]:
                                 })
                                 inst_rows.append({'Ticker': ticker_yf, 'Sector': sector})
 
-                            st.session_state.portfolio    = pd.DataFrame(portfolio_rows)
+                            # Un mismo ticker en dos cuentas (ej: Balanz + Wallbit) → una sola posición sumada
+                            _pf = pd.DataFrame(portfolio_rows)
+                            if not _pf.empty:
+                                _pf = (_pf.groupby('Ticker', as_index=False, sort=False)
+                                          .agg({'Monto_USD': 'sum', 'Target_%': 'sum', 'Sector': 'first'}))
+                                _pf[['Monto_USD', 'Target_%']] = _pf[['Monto_USD', 'Target_%']].round(2)
+                            st.session_state.portfolio    = _pf
                             st.session_state.instruments  = pd.DataFrame(inst_rows).drop_duplicates('Ticker')
 
                             # ── Poblar Sectores (solo de renta variable) ──

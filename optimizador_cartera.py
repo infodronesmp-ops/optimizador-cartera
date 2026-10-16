@@ -36,6 +36,12 @@ def save_persistent(portfolio_df, instruments_df, sectors_list, sector_targets_d
             'sectors': sectors_list,
             'sector_targets': sector_targets_dict or {},
         }
+        # Cartera total importada de Balanz (liquidez, renta fija y variable)
+        _bz = st.session_state.get('balanz_data') if hasattr(st, 'session_state') else None
+        if _bz is not None and len(_bz):
+            data['balanz_data'] = _bz.to_dict(orient='records')
+            data['balanz_tipo_cambio'] = float(st.session_state.get('balanz_tipo_cambio', 0) or 0)
+            data['balanz_tc_fuente'] = st.session_state.get('balanz_tc_fuente', '')
         with open(DATA_FILE, 'w') as f:
             json.dump(data, f, ensure_ascii=False)
         return True
@@ -115,6 +121,10 @@ if 'app_loaded' not in st.session_state:
         st.session_state.instruments     = pd.DataFrame(saved.get('instruments', DEFAULT_PORTFOLIO[['Ticker','Sector']].to_dict('records')))
         st.session_state.sectors         = saved.get('sectors', DEFAULT_SECTORS.copy())
         st.session_state.sector_targets  = saved.get('sector_targets', {})
+        if saved.get('balanz_data'):
+            st.session_state.balanz_data       = pd.DataFrame(saved['balanz_data'])
+            st.session_state.balanz_tipo_cambio = saved.get('balanz_tipo_cambio', 1400.0)
+            st.session_state.balanz_tc_fuente   = saved.get('balanz_tc_fuente', '')
     else:
         st.session_state.portfolio       = DEFAULT_PORTFOLIO.copy()
         st.session_state.instruments     = DEFAULT_PORTFOLIO[['Ticker','Sector']].copy().reset_index(drop=True)
@@ -227,6 +237,16 @@ def yf_ticker(t):
     return TICKER_MAP_YF.get(t.upper(), t)
 
 BENCHMARK = 'SPY'
+
+def ticker_yf_balanz(ticker, instrumento):
+    """Ticker de Balanz/Excel → ticker de Yahoo, según el tipo de instrumento."""
+    t = str(ticker).strip()
+    inst = str(instrumento or '').strip()
+    if inst == 'Acciones ARG':
+        return TICKER_MAP_YF.get(t, f"{t}.BA")      # con ADR → ADR; sin ADR → BYMA (se convierte con CCL)
+    if inst == 'Bitcoin':
+        return 'BTC-USD'
+    return yf_ticker(t)                              # CEDEAR → subyacente en USD
 
 def _calcular_ccl(px_):
     """CCL implícito diario a partir de un par local/ADR. Devuelve (serie, fuente) o (None, None)."""
@@ -369,6 +389,38 @@ def calc_beta(precios_a, precios_b, freq='Semanal'):
     return float(r['a'].cov(r['b']) / r['b'].var())
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def metricas_serie(serie, bench, rf=0.02, beta_freq='Semanal'):
+    """Métricas completas de una serie de valor (cartera, SPY u óptima)."""
+    s = serie.dropna()
+    r = s.pct_change().dropna()
+    anios = max(len(r) / 252, 0.01)
+    ret = r.mean() * 252
+    vol = r.std() * np.sqrt(252)
+    cagr = (s.iloc[-1] / s.iloc[0]) ** (1 / anios) - 1
+    down = np.sqrt((np.minimum(r, 0) ** 2).mean()) * np.sqrt(252)
+    mdd = (s / s.cummax() - 1).min()
+    var95 = r.quantile(0.05)
+    beta = calc_beta(s, bench, beta_freq) if bench is not None else np.nan
+    alfa = np.nan
+    if bench is not None and pd.notna(beta):
+        rb = bench.reindex(s.index).ffill().pct_change().dropna()
+        alfa = ret - (rf + beta * (rb.mean() * 252 - rf))
+    return {
+        'CAGR': cagr, 'Retorno anual': ret, 'Volatilidad': vol,
+        'Sharpe': (ret - rf) / vol if vol > 0 else np.nan,
+        'Sortino': (ret - rf) / down if down > 0 else np.nan,
+        'Calmar': cagr / abs(mdd) if mdd < 0 else np.nan,
+        'Beta': beta, 'Alfa': alfa, 'Máx Drawdown': mdd,
+        'VaR 1d 95%': -var95, 'CVaR 1d 95%': -r[r <= var95].mean(),
+    }
+
+def semaforo(v, verde, amarillo, mayor_mejor=True):
+    if pd.isna(v):
+        return '⚪'
+    if mayor_mejor:
+        return '🟢' if v >= verde else ('🟡' if v >= amarillo else '🔴')
+    return '🟢' if v <= verde else ('🟡' if v <= amarillo else '🔴')
+
 def validate_tickers(tickers):
     """Check which tickers exist on Yahoo Finance."""
     valid, invalid = [], []
@@ -474,38 +526,6 @@ def min_variance(returns_df, min_weight=0.0):
     )
     return result.x if result.success else w0
 
-def target_return_weights(returns_df, target_ret, min_weight=0.0):
-    """Minimize volatility subject to hitting a target annual return."""
-    n = len(returns_df.columns)
-    w0 = np.ones(n) / n
-    lb = max(min_weight, 0.0)
-    bounds = [(lb, 1.0)] * n
-    constraints = [
-        {'type': 'eq', 'fun': lambda w: np.sum(w) - 1},
-        {'type': 'eq', 'fun': lambda w: portfolio_metrics(w, returns_df)[0] - target_ret},
-    ]
-    result = minimize(
-        lambda w: portfolio_metrics(w, returns_df)[1],
-        w0, method='SLSQP', bounds=bounds, constraints=constraints
-    )
-    return result.x if result.success else None
-
-def black_litterman(weights, returns_df, views_q, views_conf, rf=0.02, tau=0.05):
-    """Simplified Black-Litterman model."""
-    mu_eq = returns_df.mean() * 252
-    sigma = returns_df.cov() * 252
-    pi = mu_eq  # market equilibrium proxy
-
-    n = len(weights)
-    posterior_mu = pi.copy()
-    for i, ticker in enumerate(returns_df.columns):
-        if ticker in views_q:
-            q = views_q[ticker]
-            conf = views_conf.get(ticker, 0.5)
-            posterior_mu[ticker] = (1 - conf) * pi[ticker] + conf * q
-
-    return posterior_mu
-
 def monte_carlo(port_ret, port_vol, total_usd, n_sims=500, n_days=252):
     dt = 1/252
     paths = np.zeros((n_sims, n_days+1))
@@ -586,7 +606,10 @@ def generar_resumen_excel(years, rf, beta_freq):
                          'Aporte a la beta': round(w[i] * b, 4) if not np.isnan(b) else np.nan,
                          'Aporte al riesgo %': round(rc[i], 2)})
         else:
-            motivo = 'Sin datos en Yahoo' if t not in hist.columns else 'Historia corta'
+            if t not in hist.columns or hist[t].notna().sum() < 60:
+                motivo = 'Sin datos suficientes en Yahoo'
+            else:
+                motivo = 'Historia corta'
             fila.update({'En análisis de cartera': f'No ({motivo})'})
         filas.append(fila)
     df_act = pd.DataFrame(filas).sort_values('Monto u$s', ascending=False)
@@ -682,48 +705,6 @@ with st.sidebar:
              "las acciones argentinas sin ADR: evita que los días sin operaciones subestimen la beta.")
 
     st.markdown("---")
-    st.markdown("### 📐 Opciones avanzadas")
-
-    # Retorno objetivo
-    use_target_return = st.checkbox("Usar retorno objetivo",
-        help="Optimizar la cartera buscando un retorno anual específico")
-    target_return_pct = None
-    if use_target_return:
-        target_return_pct = st.number_input(
-            "Retorno objetivo (%)", min_value=-50.0, max_value=100.0,
-            value=10.0, step=0.5,
-            help="Retorno anual objetivo para la optimización BL y Monte Carlo"
-        )
-        st.session_state['target_return'] = target_return_pct / 100
-    else:
-        st.session_state['target_return'] = None
-
-    # Peso mínimo por activo
-    min_weight_pct = st.number_input(
-        "Peso mínimo por activo (%)", min_value=0.0, max_value=50.0,
-        value=0.0, step=1.0,
-        help="Peso mínimo que debe tener cada activo en la cartera optimizada (0 = sin mínimo)"
-    )
-    st.session_state['min_weight'] = min_weight_pct / 100
-
-    st.markdown("---")
-    st.markdown("### 🏷️ Gestión de sectores")
-    new_sector = st.text_input("Nuevo sector", placeholder="Ej: REITs")
-    if st.button("➕ Agregar sector") and new_sector.strip():
-        if new_sector.strip() not in st.session_state.sectors:
-            st.session_state.sectors.append(new_sector.strip())
-            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
-            st.success(f"Sector '{new_sector}' agregado")
-        else:
-            st.warning("Ya existe ese sector")
-
-    sector_to_del = st.selectbox("Eliminar sector", ["—"] + st.session_state.sectors)
-    if st.button("🗑️ Eliminar sector") and sector_to_del != "—":
-        st.session_state.sectors.remove(sector_to_del)
-        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
-        st.success(f"Sector '{sector_to_del}' eliminado")
-
-    st.markdown("---")
     if st.button("🚀 Cargar datos de mercado", type="primary", use_container_width=True):
         # Normalizar tickers a formato Yahoo (ej: BRKB → BRK-B) y analizar solo posiciones con monto > 0
         _port = st.session_state.portfolio.copy()
@@ -792,35 +773,54 @@ with st.sidebar:
                 use_container_width=True)
 
     st.markdown("---")
-    st.caption("📊 Optimizador de Cartera v4.1\nDatos: Yahoo Finance")
+    st.caption("📊 Optimizador de Cartera v4.4\nDatos: Yahoo Finance")
 
 # ─────────────────────────────────────────
 #  HEADER
 # ─────────────────────────────────────────
 st.markdown("# 📊 Optimizador de Cartera")
-st.markdown("*Rebalanceo · Sectores · Correlación · Métricas · Black-Litterman · Monte Carlo — datos reales de Yahoo Finance*")
+st.markdown("*Cartera total · Renta variable · Riesgo · Optimización — datos reales de Yahoo Finance*")
 st.markdown("---")
 
 # ─────────────────────────────────────────
 #  TABS
 # ─────────────────────────────────────────
-tabs = st.tabs([
-    "📊 Tablero Macro",
-    "📥 Importar Balanz",
-    "📋 Instrumentos",
-    "📁 Mi Cartera",
-    "🏷️ Sectores",
-    "⚖️ Rebalanceo",
-    "🎯 Estrategia",
-    "🔗 Correlación",
-    "📐 Métricas",
-    "📈 Rendimiento",
-    "⚠️ VaR",
-    "🔥 Stress Test",
-    "🌐 Frontera Eficiente",
-    "🧠 Black-Litterman",
-    "🎲 Monte Carlo",
+T = st.tabs([
+    "🏠 Cartera total",
+    "🧩 Renta variable",
+    "📐 Riesgo",
+    "🎯 Optimización",
+    "📥 Importar",
+    "⚙️ Datos",
+    "📖 Guía",
 ])
+with T[1]:
+    _rv = st.tabs(["🏷️ Por sector", "🎯 Targets", "⚖️ Rebalanceo"])
+with T[2]:
+    _rk = st.tabs(["📐 Métricas", "🔗 Correlación", "📈 Rendimiento", "⚠️ VaR", "🔥 Stress test"])
+with T[3]:
+    _op = st.tabs(["🎚️ Simulador de beta", "🌐 Frontera eficiente", "🎲 Monte Carlo"])
+with T[5]:
+    _dt = st.tabs(["📁 Cartera (edición manual)", "📋 Catálogo de instrumentos", "🏷️ Sectores"])
+
+# Mapeo de las secciones originales a su nueva ubicación
+tabs = {
+    0: T[0],                       # Tablero macro → Cartera total
+    1: T[4],                       # Importar
+    2: _dt[1],                     # Catálogo de instrumentos
+    3: _dt[0],                     # Mi cartera (edición manual)
+    4: _rv[0],                     # Sectores
+    5: _rv[2],                     # Rebalanceo
+    6: _rv[1],                     # Estrategia / targets
+    7: _rk[1],                     # Correlación
+    8: _rk[0],                     # Métricas
+    9: _rk[2],                     # Rendimiento
+    10: _rk[3],                    # VaR
+    11: _rk[4],                    # Stress test
+    12: _op[1],                    # Frontera eficiente
+    14: _op[2],                    # Monte Carlo
+    15: _op[0],                    # Simulador de beta por sector
+}
 
 
 # ══════════════════════════════════════════
@@ -830,7 +830,7 @@ with tabs[0]:
     st.subheader("📊 Tablero Macro")
 
     if st.session_state.balanz_data is None:
-        st.info("📥 Primero importá tu cartera desde la pestaña **📥 Importar Balanz**")
+        st.info("📥 Primero importá tu cartera desde la solapa **📥 Importar**")
     else:
         df_b = st.session_state.balanz_data.copy()
         total_pesos = df_b['V_Actual_Pesos'].sum()
@@ -1061,7 +1061,8 @@ with tabs[1]:
                         hl = h.lower()
                         if 'ticker' in hl: col_map['Ticker'] = i
                         elif 'target' in hl and 'sector' in hl: col_map['Target_Sector'] = i  # ANTES que sector macro
-                        elif 'v. actual' in hl or 'v.actual' in hl or ('actual' in hl and 'valor' not in hl): col_map['V_Actual'] = i
+                        elif 'v. actual' in hl or 'v.actual' in hl or ('actual' in hl and 'valor' not in hl):
+                            col_map.setdefault('V_Actual', i)   # la primera columna "V. Actual" (la de Balanz) manda
                         elif 'descripci' in hl: col_map['Descripcion'] = i
                         elif hl == 'instrumento': col_map['Instrumento'] = i
                         elif 'moneda' in hl: col_map['Moneda'] = i
@@ -1253,13 +1254,7 @@ with tabs[1]:
                                 # Tickers que cotizan en ARS → hay que convertir retornos a USD
                                 TICKERS_ARS = {'METR.BA', 'TGNO4.BA'}
 
-                                if instrumento == 'Acciones ARG':
-                                    # Con ADR → ADR en USD; sin ADR → panel BYMA (.BA), se convierte con CCL
-                                    ticker_yf = TICKER_MAP_YF.get(ticker_orig, f"{ticker_orig}.BA")
-                                elif instrumento == 'Bitcoin':
-                                    ticker_yf = 'BTC-USD'  # YF ticker para Bitcoin
-                                else:
-                                    ticker_yf = yf_ticker(ticker_orig)  # CEDEAR → subyacente en USD
+                                ticker_yf = ticker_yf_balanz(ticker_orig, instrumento)
 
                                 monto_usd  = round(irow['V_Actual_Pesos'] / tc_input, 2)
                                 target_pct = round(irow['V_Actual_Pesos'] / total_rv_pesos * 100, 2) if total_rv_pesos > 0 else 0
@@ -1616,20 +1611,9 @@ with tabs[4]:
         df = calc_portfolio_weights(st.session_state.portfolio.copy())
         total = df['Total'].iloc[0]
 
-        # Sector target editor
-        st.markdown("#### Target % por sector (opcional)")
+        st.caption("Los targets por sector se editan en la solapa 🎯 Targets.")
         if 'sector_targets' not in st.session_state:
-            st.session_state.sector_targets = {s:0.0 for s in st.session_state.sectors}
-
-        sector_cols = st.columns(min(4, len(st.session_state.sectors)))
-        for i, s in enumerate(st.session_state.sectors):
-            with sector_cols[i % len(sector_cols)]:
-                val = st.number_input(s, min_value=0.0, max_value=100.0, step=1.0,
-                    value=float(st.session_state.sector_targets.get(s,0)),
-                    key=f"st_{s}")
-                st.session_state.sector_targets[s] = val
-
-        st.markdown("---")
+            st.session_state.sector_targets = {}
 
         # Group by sector
         sector_group = df.groupby('Sector').agg(
@@ -1833,7 +1817,7 @@ with tabs[6]:
     st.markdown("Definí tu **política de inversión**: cuánto % querés en cada sector, y cómo distribuirlo entre los instrumentos.")
 
     if st.session_state.portfolio.empty:
-        st.info("Cargá tu cartera primero en la pestaña 📁 Mi Cartera")
+        st.info("Importá tu cartera primero (solapa 📥 Importar)")
     else:
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         total   = df_port['Total'].iloc[0]
@@ -2165,16 +2149,71 @@ with tabs[8]:
         _down = np.sqrt((np.minimum(port_r, 0) ** 2).mean()) * np.sqrt(252)
         port_sortino = (port_ret - rf_rate) / _down if _down > 0 else np.nan
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Retorno Anual", f"{port_ret*100:.1f}%")
-        m2.metric("Volatilidad", f"{port_vol*100:.1f}%")
-        m3.metric("Sharpe", f"{port_sharpe:.2f}")
-        m4.metric("Sortino", f"{port_sortino:.2f}" if not np.isnan(port_sortino) else "—")
-        m5, m6, m7, m8 = st.columns(4)
-        m5.metric(f"Beta vs SPY ({beta_freq.lower()})", f"{port_beta:.2f}" if not np.isnan(port_beta) else "—")
-        m6.metric("Máx Drawdown", f"{port_mdd:.1f}%")
-        m7.metric("VaR 1d 95%", f"{port_var1d:.2f}%")
-        m8.metric("VaR 10d 95%", f"{port_var1d*np.sqrt(10):.2f}%")
+        mc = metricas_serie(port_serie, bench, rf_rate, beta_freq)
+
+        # ── Resumen ejecutivo con semáforos ──
+        st.markdown("#### Resumen de tu renta variable")
+        filas_sem = [
+            ("CAGR (crecimiento anual compuesto)", f"{mc['CAGR']*100:.1f}%", semaforo(mc['CAGR'], 0.08, 0.04)),
+            ("Volatilidad anual", f"{mc['Volatilidad']*100:.1f}%", semaforo(mc['Volatilidad'], 0.15, 0.25, False)),
+            ("Sharpe", f"{mc['Sharpe']:.2f}", semaforo(mc['Sharpe'], 1.0, 0.5)),
+            ("Sortino", f"{mc['Sortino']:.2f}", semaforo(mc['Sortino'], 1.5, 0.8)),
+            ("Calmar", f"{mc['Calmar']:.2f}", semaforo(mc['Calmar'], 0.5, 0.25)),
+            ("Máx Drawdown", f"{mc['Máx Drawdown']*100:.1f}%", semaforo(-mc['Máx Drawdown'], 0.20, 0.35, False)),
+            (f"Beta vs SPY ({beta_freq.lower()})", f"{mc['Beta']:.2f}" if pd.notna(mc['Beta']) else "—", "⚪"),
+            ("Alfa de Jensen (anual)", f"{mc['Alfa']*100:+.1f}%" if pd.notna(mc['Alfa']) else "—", semaforo(mc['Alfa'], 0.0, -0.03)),
+            ("VaR 1d 95%", f"{mc['VaR 1d 95%']*100:.2f}%", "⚪"),
+            ("CVaR 1d 95%", f"{mc['CVaR 1d 95%']*100:.2f}%", "⚪"),
+        ]
+        cs1, cs2 = st.columns(2)
+        for i, (lab, val, sem) in enumerate(filas_sem):
+            (cs1 if i % 2 == 0 else cs2).markdown(f"{sem} **{lab}:** {val}")
+        st.caption("🟢 bueno · 🟡 aceptable · 🔴 a revisar · ⚪ informativo. Umbrales orientativos de uso habitual, no reglas.")
+
+        # ── Comparación: tu cartera vs SPY vs carteras óptimas ──
+        st.markdown("#### Tu cartera vs SPY y carteras óptimas")
+        comp = {'Tu cartera': mc}
+        if bench is not None:
+            comp['SPY'] = metricas_serie(bench.reindex(prices_clean.index).ffill(), bench, rf_rate, beta_freq)
+        try:
+            w_ms = max_sharpe(returns, rf=rf_rate)
+            w_mv = min_variance(returns)
+            comp['Máx Sharpe (teórica)'] = metricas_serie(serie_cartera(prices_clean, w_ms), bench, rf_rate, beta_freq)
+            comp['Mín Varianza (teórica)'] = metricas_serie(serie_cartera(prices_clean, w_mv), bench, rf_rate, beta_freq)
+        except Exception:
+            pass
+        PCT = {'CAGR', 'Retorno anual', 'Volatilidad', 'Alfa', 'Máx Drawdown', 'VaR 1d 95%', 'CVaR 1d 95%'}
+        df_comp = pd.DataFrame(comp)
+        df_show = df_comp.copy().astype(object)
+        for k in df_comp.index:
+            df_show.loc[k] = [("—" if pd.isna(v) else (f"{v*100:.1f}%" if k in PCT else f"{v:.2f}")) for v in df_comp.loc[k]]
+        st.dataframe(df_show, use_container_width=True)
+        st.caption("Las carteras óptimas son teóricas, armadas desde cero mirando el pasado: sirven como referencia, "
+                   "no como receta (suelen concentrarse en pocos activos que anduvieron bien).")
+
+        # ── Beta móvil 12 meses ──
+        if bench is not None:
+            st.markdown("#### Beta móvil (12 meses)")
+            _df = pd.concat([port_serie, bench], axis=1, keys=['p', 'b']).dropna()
+            if str(beta_freq).startswith('Semanal'):
+                _r = _df.resample('W-FRI').last().pct_change().dropna(); _win = 52
+            else:
+                _r = _df.pct_change().dropna(); _win = 252
+            if len(_r) > _win + 5:
+                rb = (_r['p'].rolling(_win).cov(_r['b']) / _r['b'].rolling(_win).var()).dropna()
+                fig_rb = go.Figure()
+                fig_rb.add_trace(go.Scatter(x=rb.index, y=rb.values, line=dict(color='#00d4ff', width=2), name='Beta 12m'))
+                fig_rb.add_hline(y=1, line_dash='dot', line_color='#94a3b8', annotation_text='Beta 1 (igual al SPY)')
+                if pd.notna(mc['Beta']):
+                    fig_rb.add_hline(y=mc['Beta'], line_dash='dash', line_color='#fbbf24', annotation_text='Beta del período')
+                fig_rb.update_layout(height=320, paper_bgcolor='#111827', plot_bgcolor='#111827',
+                                     font_color='#e2e8f0', showlegend=False, yaxis_title='Beta')
+                st.plotly_chart(fig_rb, use_container_width=True)
+                st.caption(f"Beta de tu cartera calculada sobre los 12 meses previos a cada fecha (rango: "
+                           f"{rb.min():.2f} a {rb.max():.2f}). Si se mueve mucho, la beta del período completo es un promedio que esconde etapas distintas.")
+            else:
+                st.caption("Hace falta más de un año de historia común para calcular la beta móvil.")
+
         st.session_state['port_stats'] = {'ret': port_ret, 'vol': port_vol, 'sharpe': port_sharpe,
                                           'beta': port_beta if not np.isnan(port_beta) else 1.0}
 
@@ -2567,7 +2606,10 @@ with tabs[12]:
             mostrar_aviso_ventana(_info)
             returns_fe = prices_clean.pct_change().dropna()
             available = list(prices_clean.columns)  # update available after cleaning
-            min_w = st.session_state.get('min_weight', 0.0)
+            min_w = st.number_input("Peso mínimo por activo (%)", min_value=0.0, max_value=float(int(10000 / len(available)) / 100),
+                value=min(float(st.session_state.get('min_weight', 0.0)) * 100, float(int(10000 / len(available)) / 100)), step=0.1,
+                help="Obliga a que cada activo tenga al menos este peso en las carteras óptimas. 0 = sin mínimo.") / 100
+            st.session_state['min_weight'] = min_w
 
             with st.spinner("Calculando frontera eficiente (puede tardar ~20 segundos)..."):
                 # Random portfolios
@@ -2668,253 +2710,367 @@ with tabs[12]:
 
 
 # ══════════════════════════════════════════
-#  TAB 7 — BLACK-LITTERMAN
-# ══════════════════════════════════════════
-with tabs[13]:
-    st.subheader("🧠 Black-Litterman")
-    if st.session_state.portfolio.empty:
-        st.info("Cargá tu cartera primero")
-    elif st.session_state.hist_data is None:
-        st.warning("⬅️ Cargá datos de mercado primero")
-    else:
-        prices = st.session_state.hist_data
-        df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
-        available = [t for t in (st.session_state.tickers_loaded or df_port['Ticker'].tolist()) if t in prices.columns]
-        prices_clean, _info = preparar_precios(prices, available)
-        mostrar_aviso_ventana(_info)
-        available = list(prices_clean.columns)
-        returns = prices_clean.pct_change().dropna()
-
-        st.markdown("#### Ingresá tus views (expectativas de retorno)")
-        st.caption("q % anual = tu expectativa de retorno anual para ese activo | Confianza 0–1 = cuánto confiás en ese view")
-
-        views_q, views_conf = {}, {}
-        cols = st.columns(3)
-        for i, ticker in enumerate(available):
-            with cols[i % 3]:
-                st.markdown(f"**{ticker}**")
-                c1, c2 = st.columns(2)
-                views_q[ticker] = c1.number_input(f"q % {ticker}", value=15.0, step=1.0, key=f"q_{ticker}") / 100
-                views_conf[ticker] = c2.number_input(f"conf {ticker}", value=0.7, min_value=0.0, max_value=1.0, step=0.05, key=f"c_{ticker}")
-
-        if st.button("🧠 Correr Black-Litterman", type="primary"):
-            w_actual = np.array([float(df_port[df_port['Ticker']==t]['Peso_Actual_%'].values[0]) if len(df_port[df_port['Ticker']==t]) > 0 else 0.0 for t in available])
-            _w4_sum = w_actual.sum()
-            w_actual = (w_actual / _w4_sum) if _w4_sum > 0 else np.ones(len(available)) / len(available)
-
-            posterior_mu = black_litterman(w_actual, returns, views_q, views_conf, rf=rf_rate)
-            prior_mu = returns.mean() * 252
-
-            # Read sidebar settings
-            min_w = st.session_state.get('min_weight', 0.0)
-            target_ret = st.session_state.get('target_return', None)
-
-            # Optimal BL weights
-            w_bl = max_sharpe(returns, rf=rf_rate, min_weight=min_w)
-            w_minvar = min_variance(returns, min_weight=min_w)
-
-            # Target return portfolio (if enabled)
-            w_target = None
-            if target_ret is not None:
-                w_target = target_return_weights(returns, target_ret, min_weight=min_w)
-                if w_target is None:
-                    st.warning(f"⚠️ No se encontró solución para retorno objetivo {target_ret*100:.1f}% — puede estar fuera del rango alcanzable con estos activos.")
-
-            # Results table
-            bl_df = pd.DataFrame({
-                'Ticker': available,
-                'Prior (eq.) %': (prior_mu.values * 100).round(2),
-                'Posterior BL %': (posterior_mu.values * 100).round(2),
-                'Delta %': ((posterior_mu.values - prior_mu.values) * 100).round(2),
-                'Peso BL %': (w_bl * 100).round(2),
-                'Peso Actual %': (w_actual * 100).round(2),
-            }).sort_values('Delta %', ascending=False)
-
-            st.dataframe(bl_df, use_container_width=True, hide_index=True)
-
-            col1, col2 = st.columns(2)
-            with col1:
-                colors_bl = ['rgba(74,222,128,.8)' if v>=0 else 'rgba(248,113,113,.8)'
-                    for v in bl_df['Delta %']]
-                fig = go.Figure(go.Bar(x=bl_df['Ticker'], y=bl_df['Delta %'],
-                    marker_color=colors_bl, text=bl_df['Delta %'].astype(str)+'%',
-                    textposition='outside'))
-                fig.update_layout(title='Delta BL (Posterior − Prior)',
-                    paper_bgcolor='#111827', plot_bgcolor='#111827',
-                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='puntos % anual', legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
-                st.plotly_chart(fig, use_container_width=True)
-
-            with col2:
-                fig2 = go.Figure()
-                fig2.add_trace(go.Bar(name='Actual %', x=bl_df['Ticker'],
-                    y=bl_df['Peso Actual %'], marker_color='rgba(0,212,255,.7)'))
-                fig2.add_trace(go.Bar(name='BL Optimo %', x=bl_df['Ticker'],
-                    y=bl_df['Peso BL %'], marker_color='rgba(255,107,53,.7)'))
-                fig2.update_layout(barmode='group', title='Pesos: Actual vs BL Óptimo',
-                    paper_bgcolor='#111827', plot_bgcolor='#111827',
-                    font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14, yaxis_title='%', legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
-                st.plotly_chart(fig2, use_container_width=True)
-
-            # Frontier scatter
-            port_actual = portfolio_metrics(w_actual, returns, rf_rate)
-            port_bl = portfolio_metrics(w_bl, returns, rf_rate)
-            port_mv = portfolio_metrics(w_minvar, returns, rf_rate)
-
-            scatter_ports = [
-                ('Actual',      port_actual, '#00d4ff', 'x'),
-                ('BL Óptimo',   port_bl,     '#f87171', 'square'),
-                ('Min Varianza',port_mv,     '#4ade80', 'circle'),
-            ]
-            if w_target is not None:
-                port_tgt = portfolio_metrics(w_target, returns, rf_rate)
-                scatter_ports.append((f'Ret.Obj {target_ret*100:.0f}%', port_tgt, '#fbbf24', 'diamond'))
-
-            fig3 = go.Figure()
-            for label, stats, color, symbol in scatter_ports:
-                fig3.add_trace(go.Scatter(x=[stats[1]*100], y=[stats[0]*100],
-                    mode='markers+text', name=f"{label} (Sharpe:{stats[2]:.2f})",
-                    text=[label], textposition='top center',
-                    marker=dict(size=16, color=color, symbol=symbol,
-                        line=dict(width=2, color=color))))
-            fig3.update_layout(title='Frontera Eficiente: Actual vs BL vs MinVar',
-                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
-                xaxis_title='Volatilidad %', yaxis_title='Retorno %',
-                legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
-            st.plotly_chart(fig3, use_container_width=True)
-
-            # Store for MC — prefer target return portfolio if set
-            best = port_tgt if (w_target is not None) else port_bl
-            st.session_state['bl_stats'] = {
-                'ret_bl': best[0], 'vol_bl': best[1]
-            }
-
-            with st.expander("📖 ¿Cómo interpretar Black-Litterman?"):
-                st.markdown("""
-- **Black-Litterman** combina el equilibrio del mercado con tus propias expectativas (views) para calcular pesos óptimos.
-- **Prior (equilibrio)**: es el retorno implícito que el mercado "espera" de cada activo basado en su comportamiento histórico.
-- **Posterior BL**: es el retorno ajustado incorporando tu view. Si confiás 100% en tu view, el posterior = tu expectativa. Si confiás 0%, el posterior = el prior del mercado.
-- **Delta %**: cuánto cambió la expectativa de retorno al incorporar tu view. Verde = subió, rojo = bajó.
-- **Peso BL %**: la asignación óptima que maximiza el Sharpe con los retornos posteriores. Cuanto mayor el retorno esperado ajustado y menor la correlación con el resto, mayor será el peso sugerido.
-- **Confianza 0–1**: 0 = ignorás tu view completamente, 1 = confiás ciegamente en tu expectativa.
-- 💡 Tip: empezá con confianza 0.5–0.7 y ajustá según qué tan seguro estás de tu análisis.
-                """)
-
-
-# ══════════════════════════════════════════
 #  TAB 8 — MONTE CARLO
 # ══════════════════════════════════════════
 with tabs[14]:
-    st.subheader("🎲 Monte Carlo")
+    st.subheader("🎲 Monte Carlo — escenarios a futuro")
+    st.caption("Simula miles de caminos posibles para tu renta variable con los pesos actuales. "
+               "No predice: muestra el rango de resultados razonables según el retorno y la volatilidad que supongas.")
     if st.session_state.portfolio.empty:
-        st.info("Cargá tu cartera primero")
-    elif st.session_state.hist_data is None:
-        st.warning("⬅️ Cargá datos de mercado primero")
+        st.info("Importá tu cartera primero (solapa 📥 Importar)")
+    elif 'port_stats' not in st.session_state:
+        st.warning("⬅️ Cargá datos de mercado primero (el cálculo usa la volatilidad real de tu cartera)")
     else:
         df_port = calc_portfolio_weights(st.session_state.portfolio.copy())
         total = df_port['Total'].iloc[0]
-        port_stats = st.session_state.get('port_stats', {'ret':0.18,'vol':0.22})
-        bl_stats = st.session_state.get('bl_stats', None)
+        ps = st.session_state['port_stats']
 
-        col1, col2, col3 = st.columns(3)
-        n_sims = col1.number_input("N° simulaciones", value=500, min_value=100, max_value=2000, step=100)
-        n_days = col2.number_input("Días de trading", value=252, min_value=60, max_value=756, step=21)
-        show_paths = col3.number_input("Trayectorias a mostrar", value=60, min_value=10, max_value=200, step=10)
+        c1, c2, c3 = st.columns(3)
+        mu = c1.number_input("Retorno anual supuesto (%)", value=float(round(min(ps['ret'], 0.15) * 100, 1)),
+            min_value=-30.0, max_value=60.0, step=0.5,
+            help=f"El retorno histórico de tu cartera fue {ps['ret']*100:.1f}% anual, pero proyectarlo tal cual "
+                 f"suele ser optimista. Por defecto se usa el menor entre el histórico y 15%.") / 100
+        vol = c2.number_input("Volatilidad anual (%)", value=float(round(ps['vol'] * 100, 1)),
+            min_value=1.0, max_value=150.0, step=0.5,
+            help="Por defecto, la volatilidad real de tu cartera en la ventana de análisis.") / 100
+        anios_mc = c3.selectbox("Horizonte", [1, 2, 3, 5], index=0, format_func=lambda x: f"{x} año{'s' if x > 1 else ''}")
 
-        if st.button("🎲 Correr simulación", type="primary"):
-            mu_act = port_stats['ret']
-            vol_act = port_stats['vol']
-            mu_bl = bl_stats['ret_bl'] if bl_stats else mu_act * 1.15
-            vol_bl = bl_stats['vol_bl'] if bl_stats else vol_act * 0.88
+        n_days = int(252 * anios_mc)
+        np.random.seed(42)
+        paths = monte_carlo(mu, vol, total, 2000, n_days)
+        finales = paths[:, -1]
+        p5, p50, p95 = np.percentile(finales, [5, 50, 95])
+        prob_perdida = (finales < total).mean() * 100
 
-            with st.spinner("Simulando..."):
-                paths_act = monte_carlo(mu_act, vol_act, total, int(n_sims), int(n_days))
-                paths_bl  = monte_carlo(mu_bl,  vol_bl,  total, int(n_sims), int(n_days))
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Hoy", fmt_usd(total))
+        m2.metric("Escenario malo (P5)", fmt_usd(p5), delta=f"{(p5/total-1)*100:.1f}%")
+        m3.metric("Escenario medio (P50)", fmt_usd(p50), delta=f"{(p50/total-1)*100:.1f}%")
+        m4.metric("Escenario bueno (P95)", fmt_usd(p95), delta=f"{(p95/total-1)*100:.1f}%")
+        st.caption(f"Probabilidad de terminar el período con menos de lo que tenés hoy: **{prob_perdida:.0f}%**")
 
-            mean_act = paths_act.mean(axis=0)
-            mean_bl  = paths_bl.mean(axis=0)
-            days_x = list(range(int(n_days)+1))
+        x = np.arange(n_days + 1)
+        bandas = np.percentile(paths, [5, 25, 50, 75, 95], axis=0)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=x, y=bandas[4], line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=x, y=bandas[0], fill='tonexty', fillcolor='rgba(0,212,255,0.12)',
+                                 line=dict(width=0), name='Rango P5–P95'))
+        fig.add_trace(go.Scatter(x=x, y=bandas[3], line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=x, y=bandas[1], fill='tonexty', fillcolor='rgba(0,212,255,0.25)',
+                                 line=dict(width=0), name='Rango P25–P75'))
+        fig.add_trace(go.Scatter(x=x, y=bandas[2], line=dict(color='#00d4ff', width=2.5), name='Mediana'))
+        fig.add_hline(y=total, line_dash='dash', line_color='#94a3b8', annotation_text='Capital actual')
+        fig.update_layout(height=420, xaxis_title='Días hábiles', yaxis_title='u$s',
+            paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0',
+            legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("⚠️ Supone retornos con distribución normal. En crisis reales las caídas suelen ser más fuertes "
+                   "que lo que muestra el escenario malo.")
 
-            # MC chart
-            fig = go.Figure()
-            step = max(1, int(n_sims)//int(show_paths))
-            for i in range(0, int(n_sims), step):
-                fig.add_trace(go.Scatter(x=days_x, y=paths_act[i], mode='lines',
-                    line=dict(color='rgba(0,212,255,0.06)', width=1), showlegend=False))
-                fig.add_trace(go.Scatter(x=days_x, y=paths_bl[i], mode='lines',
-                    line=dict(color='rgba(255,107,53,0.06)', width=1), showlegend=False))
-            fig.add_trace(go.Scatter(x=days_x, y=mean_act, mode='lines', name='Media Actual',
-                line=dict(color='#00d4ff', width=3)))
-            fig.add_trace(go.Scatter(x=days_x, y=mean_bl, mode='lines', name='Media BL Optimizada',
-                line=dict(color='#ff6b35', width=3)))
-            fig.update_layout(
-                title=f'Proyección Monte Carlo ({int(n_days)} días) — Capital inicial: {fmt_usd(total)}',
-                paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
-                xaxis_title='Días de Trading', yaxis_title='Valor USD',
-                yaxis=dict(tickformat='$,.0f'),
-                legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
-            st.plotly_chart(fig, use_container_width=True)
 
-            final_act = paths_act[:, -1]
-            final_bl  = paths_bl[:, -1]
-            med_act = final_act.mean()
-            med_bl  = final_bl.mean()
-            gain = (med_bl - med_act) / med_act * 100
+# ══════════════════════════════════════════
+#  OPTIMIZACIÓN — SIMULADOR DE BETA POR SECTOR
+# ══════════════════════════════════════════
+CAMPOS_AGRUP = {"Sector macro": "Sector_Macro", "Subsector": "Sector_Detalle", "País": "Pais"}
 
-            m1,m2,m3,m4,m5,m6 = st.columns(6)
-            m1.metric("Capital inicial", fmt_usd(total))
-            m2.metric("Media Actual (1 año)", fmt_usd(med_act))
-            m3.metric("Media BL Optimizada", fmt_usd(med_bl), delta=f"+{gain:.1f}%")
-            m4.metric("Peor 5% Actual", fmt_usd(np.percentile(final_act,5)))
-            m5.metric("Peor 5% BL", fmt_usd(np.percentile(final_bl,5)))
-            m6.metric("Mejor 95% BL", fmt_usd(np.percentile(final_bl,95)))
+def mapa_grupos(campo):
+    """Ticker (Yahoo) → grupo, a partir de la clasificación del Excel importado."""
+    m = {}
+    bz = st.session_state.get('balanz_data')
+    if bz is not None and len(bz) and campo in bz.columns:
+        rv = bz[bz['Renta'].astype(str).str.strip() == 'Variable']
+        for _, r in rv.iterrows():
+            v = str(r.get(campo, '')).strip()
+            if v and v not in ('0', 'None', 'nan', '#N/A'):
+                m.setdefault(ticker_yf_balanz(r['Ticker'], r.get('Instrumento', '')), v)
+    return m
 
-            col1, col2 = st.columns(2)
-            with col1:
-                all_vals = np.concatenate([final_act, final_bl])
-                bins = np.linspace(all_vals.min(), all_vals.max(), 35)
-                hist_act, _ = np.histogram(final_act, bins=bins)
-                hist_bl,  _ = np.histogram(final_bl,  bins=bins)
-                bin_centers = (bins[:-1] + bins[1:]) / 2
+with tabs[15]:
+    st.subheader("🎚️ Simulador de beta por sector")
+    st.caption("Mirá tu renta variable por sector, probá subir unos y bajar otros, y fijate qué pasa con la beta "
+               "y la volatilidad. Al subir un sector se supone que comprás más de lo que ya tenés en él, en la misma proporción.")
+    if st.session_state.portfolio.empty:
+        st.info("Importá tu cartera primero (solapa 📥 Importar)")
+    elif st.session_state.hist_data is None or st.session_state.get('bench_data') is None:
+        st.warning("⬅️ Cargá datos de mercado primero")
+    else:
+        agrup = st.radio("Agrupar por", list(CAMPOS_AGRUP.keys()), horizontal=True, key="sim_agrup")
+        campo = CAMPOS_AGRUP[agrup]
+        hist = st.session_state.hist_data
+        bench = st.session_state.bench_data
+        dfp = calc_portfolio_weights(st.session_state.portfolio.copy())
+        total_rv = float(dfp['Monto_USD'].sum())
+        mapa = mapa_grupos(campo)
+        dfp['Grupo'] = [mapa.get(t) or (s if campo == 'Sector_Macro' and s else 'Sin clasificar')
+                        for t, s in zip(dfp['Ticker'], dfp['Sector'].fillna(''))]
+        if not mapa and campo != 'Sector_Macro':
+            st.warning("No encuentro esa clasificación: volvé a importar el Excel para traer subsector y país.")
 
-                fig2 = go.Figure()
-                fig2.add_trace(go.Bar(x=bin_centers, y=hist_act,
-                    name=f'Actual (Media: {fmt_usd(med_act)})',
-                    marker_color='rgba(0,212,255,0.55)'))
-                fig2.add_trace(go.Bar(x=bin_centers, y=hist_bl,
-                    name=f'BL Optim (Media: {fmt_usd(med_bl)})',
-                    marker_color='rgba(255,107,53,0.55)'))
-                fig2.update_layout(barmode='overlay', title='Distribución de valor final',
-                    paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
-                    xaxis=dict(tickformat='$,.0f'), yaxis_title='Frecuencia',
-                    legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
-                st.plotly_chart(fig2, use_container_width=True)
+        # ── Serie de retornos de cada grupo (ventana común, pesos actuales dentro del grupo) ──
+        pc, _info = preparar_precios(hist, dfp['Ticker'].tolist())
+        rets = pc.pct_change().dropna()
+        R, sin_datos = {}, []
+        for g, sub in dfp.groupby('Grupo'):
+            tk = [t for t in sub['Ticker'] if t in rets.columns]
+            if not tk:
+                sin_datos.append(g)
+                continue
+            ww = sub.groupby('Ticker')['Monto_USD'].sum().reindex(tk).values
+            R[g] = pd.Series(rets[tk].values @ (ww / ww.sum()), index=rets.index)
 
-            with col2:
-                pcts = [5,10,25,50,75,90,95]
-                fig3 = go.Figure()
-                fig3.add_trace(go.Bar(x=[f'P{p}' for p in pcts],
-                    y=[np.percentile(final_act,p) for p in pcts],
-                    name='Actual', marker_color='rgba(0,212,255,0.7)'))
-                fig3.add_trace(go.Bar(x=[f'P{p}' for p in pcts],
-                    y=[np.percentile(final_bl,p) for p in pcts],
-                    name='BL Optim', marker_color='rgba(255,107,53,0.7)'))
-                fig3.update_layout(barmode='group', title='Percentiles de resultado',
-                    paper_bgcolor='#111827', plot_bgcolor='#111827', font_color='#e2e8f0', title_font_color='#00d4ff', title_font_size=14,
-                    yaxis=dict(tickformat='$,.0f'),
-                    legend=dict(font=dict(size=11, color='#e2e8f0'), bgcolor='rgba(0,0,0,0)'))
-                st.plotly_chart(fig3, use_container_width=True)
+        # ── Sectores nuevos (teóricos) ──
+        with st.expander("➕ Agregar un sector nuevo (teórico)", expanded=False):
+            st.caption("Poné un nombre, el % que le querés asignar y uno o más tickers representativos separados por coma "
+                       "(acciones o un ETF del sector). La app calcula su beta con datos reales.")
+            nuevos_df = st.data_editor(
+                st.session_state.get('sim_nuevos', pd.DataFrame({'Sector': [''], 'Tickers': [''], '% a asignar': [0.0]})),
+                num_rows="dynamic", use_container_width=True, key="sim_nuevos_editor",
+                column_config={'% a asignar': st.column_config.NumberColumn(format="%.2f", step=0.5),
+                               'Tickers': st.column_config.TextColumn(help="Ej: COHR, AAOI")})
+        nuevos = []
+        for _, nr in nuevos_df.iterrows():
+            nombre = str(nr.get('Sector') or '').strip()
+            tks = [yf_ticker(x) for x in str(nr.get('Tickers') or '').replace(';', ',').split(',') if x.strip()]
+            pct = float(nr.get('% a asignar') or 0)
+            if not nombre or not tks:
+                continue
+            if nombre in R:
+                nombre = f"{nombre} (nuevo)"
+            with st.spinner(f"Bajando datos de {', '.join(tks)}..."):
+                p_new, _b, _n = fetch_data(tks, f"{years}y")
+            if p_new is None or p_new.empty:
+                st.warning(f"No hay datos para {', '.join(tks)}.")
+                continue
+            r_new = p_new.reindex(pc.index).ffill(limit=5).pct_change()
+            r_new = r_new.loc[rets.index].mean(axis=1, skipna=True)   # igual peso entre los tickers
+            if r_new.notna().sum() < 60:
+                st.warning(f"{nombre}: historia insuficiente en la ventana de análisis.")
+                continue
+            R[nombre] = r_new
+            nuevos.append({'Grupo': nombre, 'pct': pct, 'tickers': ', '.join(tks)})
 
-            with st.expander("📖 ¿Cómo interpretar Monte Carlo?"):
-                st.markdown("""
-- La simulación genera **500 trayectorias posibles** de tu cartera durante 1 año (252 días hábiles), usando el retorno y volatilidad históricos.
-- **Línea azul** = trayectoria promedio de tu cartera actual.
-- **Línea naranja** = trayectoria promedio de la cartera optimizada con Black-Litterman.
-- Las trayectorias tenues de fondo muestran la dispersión real de escenarios posibles — arriba y abajo.
-- **Distribución final**: el histograma muestra en cuántas simulaciones terminaste en cada rango de valor. Una distribución más ancha = más incertidumbre.
-- **Percentiles**:
-  - P5 = peor escenario probable (solo 5% de simulaciones terminaron peor que esto)
-  - P50 = resultado mediano esperado
-  - P95 = mejor escenario probable (solo 5% terminaron mejor que esto)
-- 💡 La diferencia entre la cartera Actual y BL Optimizada refleja el impacto de los pesos sugeridos por Black-Litterman.
-- ⚠️ Monte Carlo asume retornos normales y distribución estable — en crisis reales, las colas son más gruesas.
-                """)
+        R = pd.DataFrame(R)
+        precios_g = (1 + R.fillna(0)).cumprod()
+        beta_g = {g: calc_beta(precios_g[g].where(R[g].notna()), bench, beta_freq) for g in R.columns}
+        vol_g = (R.std() * np.sqrt(252)).to_dict()
+        cov = R.cov() * 252
+
+        # ── Tabla editable ──
+        act = dfp.groupby('Grupo')['Monto_USD'].sum().sort_values(ascending=False)
+        base = pd.DataFrame({'Grupo': act.index, '% actual': (act.values / total_rv * 100).round(2)})
+        base['Beta'] = base['Grupo'].map(beta_g).round(2)
+        base['Volatilidad %'] = (base['Grupo'].map(vol_g) * 100).round(1)
+        base['Cambio (pp)'] = 0.0
+        key_tab = f"sim_tabla_{campo}"
+        if st.button("↺ Volver a cero los cambios"):
+            st.session_state.pop(key_tab, None)
+            st.rerun()
+        st.markdown("##### Escribí en **Cambio** cuántos puntos subís (+) o bajás (−) cada grupo")
+        ed = st.data_editor(base, key=key_tab, hide_index=True, use_container_width=True,
+            disabled=['Grupo', '% actual', 'Beta', 'Volatilidad %'],
+            column_config={
+                '% actual': st.column_config.NumberColumn(format="%.2f%%"),
+                'Beta': st.column_config.NumberColumn(format="%.2f", help="Beta del grupo vs SPY con los pesos actuales de sus activos"),
+                'Volatilidad %': st.column_config.NumberColumn(format="%.1f%%"),
+                'Cambio (pp)': st.column_config.NumberColumn(format="%+.2f", step=0.5),
+            })
+
+        # ── Resultado ──
+        res = ed[['Grupo', '% actual', 'Beta']].copy()
+        res['Cambio (pp)'] = ed['Cambio (pp)'].fillna(0).astype(float)
+        for nv in nuevos:
+            res = pd.concat([res, pd.DataFrame([{'Grupo': nv['Grupo'], '% actual': 0.0,
+                             'Beta': round(beta_g.get(nv['Grupo'], np.nan), 2), 'Cambio (pp)': nv['pct']}])],
+                            ignore_index=True)
+        res['% nuevo'] = res['% actual'] + res['Cambio (pp)']
+        suma_cambios = res['Cambio (pp)'].sum()
+        negativos = res[res['% nuevo'] < -0.005]
+
+        if abs(suma_cambios) > 0.05:
+            st.error(f"🚨 Los cambios no suman cero: suman **{suma_cambios:+.2f} pp** "
+                     f"(la cartera nueva da {res['% nuevo'].sum():.2f}%). "
+                     f"{'Te falta bajar' if suma_cambios > 0 else 'Te falta subir'} {abs(suma_cambios):.2f} pp en algún grupo.")
+        if not negativos.empty:
+            st.error("🚨 Quedan con % negativo: " + ", ".join(negativos['Grupo']) + ". No podés bajar más de lo que tenés.")
+
+        def _beta_vol(pcts):
+            g = [x for x in pcts.index if x in cov.columns and pd.notna(beta_g.get(x))]
+            x = pcts.reindex(g).fillna(0).clip(lower=0).values
+            if x.sum() <= 0:
+                return np.nan, np.nan, pd.Series(dtype=float)
+            x = x / x.sum()
+            b = float(np.dot(x, [beta_g[k] for k in g]))
+            C = cov.loc[g, g].fillna(0).values
+            var = float(x @ C @ x)
+            aporte = pd.Series(x * (C @ x) / var * 100 if var > 0 else np.nan, index=g)
+            return b, np.sqrt(var), aporte
+
+        b0, v0, _ = _beta_vol(res.set_index('Grupo')['% actual'])
+        b1, v1, aporte1 = _beta_vol(res.set_index('Grupo')['% nuevo'])
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Beta actual", f"{b0:.2f}")
+        c2.metric("Beta simulada", f"{b1:.2f}", delta=f"{b1-b0:+.2f}", delta_color="off")
+        c3.metric("Volatilidad actual", f"{v0*100:.1f}%")
+        c4.metric("Volatilidad simulada", f"{v1*100:.1f}%", delta=f"{(v1-v0)*100:+.1f} pp", delta_color="inverse")
+
+        res['u$s a mover'] = (res['Cambio (pp)'] / 100 * total_rv).round(0)
+        res['u$s nuevo'] = (res['% nuevo'] / 100 * total_rv).round(0)
+        res['Aporte a la beta'] = (res['% nuevo'] / 100 * res['Beta']).round(3)
+        res['Aporte al riesgo %'] = res['Grupo'].map(aporte1).round(1)
+        cambios = res[res['Cambio (pp)'].abs() > 0.001]
+        st.markdown("##### Resultado")
+        st.dataframe(res[['Grupo', '% actual', 'Cambio (pp)', '% nuevo', 'u$s a mover', 'u$s nuevo',
+                          'Beta', 'Aporte a la beta', 'Aporte al riesgo %']]
+                     .sort_values('% nuevo', ascending=False),
+            hide_index=True, use_container_width=True,
+            column_config={
+                '% actual': st.column_config.NumberColumn(format="%.2f%%"),
+                'Cambio (pp)': st.column_config.NumberColumn(format="%+.2f"),
+                '% nuevo': st.column_config.NumberColumn(format="%.2f%%"),
+                'u$s a mover': st.column_config.NumberColumn(format="%+,.0f"),
+                'u$s nuevo': st.column_config.NumberColumn(format="%,.0f"),
+                'Aporte al riesgo %': st.column_config.NumberColumn(format="%.1f%%",
+                    help="Qué parte de la volatilidad de la cartera simulada aporta cada grupo"),
+            })
+        if not cambios.empty:
+            st.caption("Movimientos: " + " · ".join(
+                f"{r['Grupo']} {'+' if r['u$s a mover'] > 0 else ''}u$s {r['u$s a mover']:,.0f}" for _, r in cambios.iterrows()))
+        notas = []
+        if sin_datos:
+            notas.append(f"Sin datos de precios (no entran en beta ni volatilidad): {', '.join(sin_datos)}.")
+        if _info.get('cortos'):
+            notas.append(f"Activos con historia corta excluidos del cálculo: {', '.join(_info['cortos'])}.")
+        notas.append(f"Beta {beta_freq.lower()} vs SPY, ventana desde {pc.index[0]:%m/%Y}. "
+                     "Puede diferir unas centésimas de la solapa Métricas porque acá se calcula por grupo.")
+        st.caption(" ".join(notas))
+
+
+# ══════════════════════════════════════════
+#  GUÍA DE USO
+# ══════════════════════════════════════════
+with T[6]:
+    st.subheader("📖 Guía de uso")
+    g1, g2, g3 = st.tabs(["🚶 Paso a paso", "📊 Qué significa cada resultado", "❓ Preguntas frecuentes"])
+
+    with g1:
+        st.markdown("""
+### Antes de entrar: preparar el Excel
+1. En tu Excel, solapa **"Actualizar de Balanz"**, pegá la tenencia de Balanz **en la vista en dólares** (los valores vienen con "u$s").
+2. Lo que no viene de Balanz (BTC, Wallbit) cargalo **en dólares, el número solo**.
+3. Lo de bancos (FCI, plazos fijos, cajas de ahorro) cargalo **en pesos**, con un tipo de instrumento que diga **"Banco"**. La app los pasa a dólares sola con el MEP del día.
+4. Si compraste algo nuevo, clasificalo en **"Detalle instrumentos"** (renta, sector, país). La hoja "Revisar!" te avisa si falta algo.
+5. **Guardá el Excel.**
+
+### En la app
+**Paso 1 — Importar** (solapa 📥 Importar)
+- Subí el Excel. El tipo de cambio viene solo (MEP automático).
+- Revisá la vista previa: la columna **"Leído en"** dice USD o ARS para cada instrumento. Lo de bancos tiene que decir ARS y todo lo demás USD.
+- Compará el **total en u$s** con el que te muestra Balanz más tus bancos. Si hay un cartel rojo, leelo antes de seguir.
+- Tocá **"Confirmar e importar cartera"**.
+
+**Paso 2 — Cargar datos de mercado** (panel izquierdo)
+- Tocá **🚀 Cargar datos de mercado**. Baja la historia de precios de Yahoo Finance (tarda uno o dos minutos).
+- Sin este paso, las solapas de Riesgo y Optimización quedan vacías.
+
+**Paso 3 — Mirar la foto general** (🏠 Cartera total)
+- Cuánto tenés en renta variable, renta fija y liquidez; en pesos y dólares; por sector.
+
+**Paso 4 — Analizar el riesgo** (📐 Riesgo → Métricas)
+- Arriba, el resumen con semáforos. Después la comparación contra el SPY, la beta móvil y qué activos te aportan más riesgo.
+
+**Paso 5 — Simular un rebalanceo** (🎯 Optimización → 🎚️ Simulador de beta)
+- Elegí agrupar por sector, subsector o país.
+- En **Cambio** poné cuántos puntos subís (+) o bajás (−). Tienen que sumar cero.
+- Mirá cómo cambian la beta y la volatilidad, y cuántos u$s mover en cada grupo.
+- Para evaluar un sector que no tenés, usá **"Agregar un sector nuevo"** con tickers de ejemplo.
+
+**Paso 6 — Afinar por activo** (🧩 Renta variable)
+- Una vez decidido el movimiento por sector, elegí qué activos comprar o vender dentro de cada uno.
+
+**Paso 7 — Exportar** (panel izquierdo → 📤 Exportar resumen)
+- Genera un Excel con todo lo calculado. Sirve para guardar un registro o para mandármelo si algo no te cierra.
+
+### Configuración del panel izquierdo
+- **Años de historia:** cuánto pasado se descarga. 5 es un buen equilibrio.
+- **Historia mínima para el análisis de cartera:** los activos más nuevos que esto quedan fuera de los cálculos de cartera, para no achicar la ventana de todos. Se avisa qué % de la cartera queda afuera.
+- **Frecuencia para calcular Beta:** semanal (recomendada) o diaria.
+- **Tasa libre de riesgo:** el rendimiento "sin riesgo" contra el que se comparan Sharpe, Sortino y Alfa.
+""")
+
+    with g2:
+        st.markdown("""
+### Retorno
+- **Retorno anual:** promedio de los retornos diarios, anualizado. Tiende a ser algo mayor que el CAGR.
+- **CAGR:** cuánto creció la cartera por año, en forma compuesta. Es el número "real" de crecimiento.
+- **Alfa de Jensen:** cuánto ganaste **por encima** de lo que te correspondía por tu beta. Positivo = tus elecciones agregaron valor más allá de seguir al mercado. Negativo = te hubiera ido mejor con un índice de igual riesgo de mercado.
+
+### Riesgo
+- **Volatilidad:** cuánto oscila la cartera en un año. 15% = en un año normal, la cartera se mueve en un rango de ±15% respecto de su promedio.
+- **Beta vs SPY:** cuánto se mueve tu cartera **junto con** el SPY. Beta 1 = si el SPY cae 10%, tu cartera cae ~10% por ese motivo. Beta 0,5 = cae ~5%. **Ojo:** la beta no mide todo el riesgo, solo la parte ligada a Wall Street. Bitcoin o las acciones argentinas pueden tener beta baja y riesgo muy alto.
+- **Beta móvil:** la beta calculada mes a mes sobre los 12 meses anteriores. Muestra si es estable o si cambia según la época.
+- **Máx Drawdown:** la peor caída desde un máximo hasta un mínimo. Es lo que se siente en el bolsillo.
+- **VaR 1d 95%:** la pérdida diaria que solo se supera 1 de cada 20 días. VaR 2% = en 19 de cada 20 días perdés menos de 2%.
+- **CVaR 1d 95%:** cuánto perdés **en promedio** en ese peor 5% de los días. Es más honesto que el VaR, porque mira qué tan malos son los días malos.
+- **Aporte al riesgo:** qué parte de la volatilidad total aporta cada activo o sector. Si algo pesa 10% y aporta 30% del riesgo, es el que manda.
+
+### Retorno ajustado por riesgo
+- **Sharpe:** retorno por encima de la tasa sin riesgo, por cada unidad de volatilidad. Más de 1 es muy bueno, entre 0,5 y 1 aceptable.
+- **Sortino:** igual que Sharpe pero solo castiga la volatilidad a la baja. Útil con activos que tienen subas fuertes.
+- **Calmar:** CAGR dividido la peor caída. Responde: ¿cuánto crecimiento obtuve por cada punto de caída que tuve que soportar?
+
+### Otras herramientas
+- **Correlación:** de -1 a 1, cuánto se mueven juntos dos activos. Cerca de 1 = no diversifican entre sí.
+- **Frontera eficiente:** las mejores combinaciones teóricas de riesgo y retorno con tus activos, y dónde está tu cartera hoy.
+- **Carteras óptimas (Máx Sharpe / Mín Varianza):** referencias teóricas armadas desde cero mirando el pasado. No son recomendaciones.
+- **Stress test:** cuánto perdería tu cartera en escenarios de crisis.
+- **Monte Carlo:** miles de caminos posibles a futuro. El escenario malo (P5) es lo que solo un 5% de los caminos hace peor.
+- **Simulador de beta:** qué pasa con la beta y la volatilidad si movés porcentajes entre sectores.
+
+### Semáforos
+Son umbrales orientativos de uso habitual en gestión de carteras (por ejemplo, Sharpe mayor a 1 en verde). No son reglas: una cartera agresiva a propósito va a tener volatilidad en rojo, y está bien si es lo que buscás.
+""")
+
+    with g3:
+        st.markdown("""
+**¿Por qué mi beta es baja si tengo mucho Bitcoin?**
+Porque Bitcoin es muy volátil pero se mueve poco junto con el SPY. Su riesgo aparece en la volatilidad y en el aporte al riesgo, no en la beta.
+
+**¿Por qué la beta de una acción argentina es tan baja?**
+Porque se mueve sobre todo por factores locales (política, riesgo país), no por Wall Street. No significa que sea defensiva.
+
+**¿Por qué la beta cambia unas centésimas entre solapas?**
+Porque algunas se calculan activo por activo y otras por grupo, y la ventana de datos puede variar levemente.
+
+**¿Con qué dólar se valúa?**
+Con el MEP de venta del día (dolarapi.com). Solo afecta a lo que cargás en pesos (bancos); lo de Balanz ya viene en dólares.
+
+**Un activo no aparece en los análisis.**
+Puede ser que Yahoo no tenga datos de ese ticker, o que tenga menos historia que el mínimo configurado. La app avisa en cada caso.
+
+**¿Hay que volver a importar cada vez?**
+La app guarda la última cartera importada, pero se puede perder cuando se actualiza. Ante la duda, importá de nuevo el Excel: es un minuto.
+""")
+
+
+# ══════════════════════════════════════════
+#  DATOS — SECTORES
+# ══════════════════════════════════════════
+with _dt[2]:
+    st.subheader("🏷️ Sectores")
+    st.caption("Normalmente los sectores vienen de tu Excel. Esto es solo para cargas manuales.")
+    st.write(", ".join(st.session_state.sectors) if st.session_state.sectors else "Sin sectores")
+    new_sector = st.text_input("Nuevo sector", placeholder="Ej: REITs")
+    if st.button("➕ Agregar sector") and new_sector.strip():
+        if new_sector.strip() not in st.session_state.sectors:
+            st.session_state.sectors.append(new_sector.strip())
+            save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
+            st.success(f"Sector '{new_sector}' agregado")
+        else:
+            st.warning("Ya existe ese sector")
+
+    sector_to_del = st.selectbox("Eliminar sector", ["—"] + st.session_state.sectors)
+    if st.button("🗑️ Eliminar sector") and sector_to_del != "—":
+        st.session_state.sectors.remove(sector_to_del)
+        save_persistent(st.session_state.portfolio, st.session_state.instruments, st.session_state.sectors, st.session_state.get("sector_targets",{}))
+        st.success(f"Sector '{sector_to_del}' eliminado")
